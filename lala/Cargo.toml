@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0"
+rustyline = "14.0"
+llama_cpp = "0.3"
+
+[build-dependencies]
