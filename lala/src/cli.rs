@@ -21,9 +21,14 @@ pub fn run(model_path: &str) -> anyhow::Result<()> {
         if input == "/exit" {
             break;
         }
+        
 
-        let prompt = "User: Hello, who are you?\nAssistant:";
-        session.session.advance_context(prompt)?;
+        let prompt = if input.is_empty() {
+            "User: Hello, who are you?\nAssistant:".to_string()
+        } else {
+            format!("User: {}\nAssistant:", input)
+        };
+        session.session.advance_context(&prompt)?;
 
         // let response = session.complete(input, 512)?;
         let mut stream = session.session.start_completing_with(StandardSampler::default(), 512)?;
@@ -32,7 +37,8 @@ pub fn run(model_path: &str) -> anyhow::Result<()> {
 
 
             let text = model.model.token_to_piece(token);
-            print!("{:?}", text);
+            print!("{}", text);
+
             io::stdout().flush().unwrap();
         }
         println!();
