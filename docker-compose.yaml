@@ -26,7 +26,7 @@ services:
 
 
   postgres:
-    image: postgres:18
+    image: psqldocker
     container_name: postgres
     ports:
       - "5432:5432"
@@ -35,7 +35,7 @@ services:
       POSTGRES_PASSWORD: mypassword
       POSTGRES_DB: mydb
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
 volumes:
