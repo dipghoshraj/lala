@@ -1,18 +1,34 @@
 mod loalYaml;
 mod model;
+mod api;
 
+use std::sync::Arc;
+use tracing::info;
+use tracing_subscriber::{EnvFilter, fmt};
 use loalYaml::loadYaml::load_config;
 use model::{ModelParams, ModelRunner};
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialise structured logging.
+    // Control verbosity via RUST_LOG, e.g.:
+    //   RUST_LOG=info          — info and above (default)
+    //   RUST_LOG=LLML=debug    — debug for this crate only
+    //   RUST_LOG=debug         — everything including deps
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(true)
+        .with_thread_ids(true)
+        .init();
+
     let config_path = "../ai-config.yaml";
     let config = load_config(config_path).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Use the first model entry in the config.
     let model_cfg = config.models.first()
         .ok_or_else(|| anyhow::anyhow!("No models defined in config"))?;
 
-    // Extract parameters with fallback to defaults.
     let temperature = model_cfg.parameters.iter()
         .find(|p| p.name == "temperature")
         .and_then(|p| p.default.as_f64())
@@ -23,28 +39,20 @@ fn main() -> anyhow::Result<()> {
         .and_then(|p| p.default.as_u64())
         .unwrap_or(100) as usize;
 
-    println!("Config: model={}, temperature={}, max_tokens={}", model_cfg.name, temperature, max_tokens);
-
-    // Load the model once.
-    let runner = ModelRunner::load(
+    // Load the model once; wrap in Arc for shared access across requests.
+    let runner = Arc::new(ModelRunner::load(
         &model_cfg.model_path,
         ModelParams { temperature, max_tokens },
-    )?;
+    )?);
 
-    // Simple REPL — type a prompt, press Enter, get a response. Empty line exits.
-    let stdin = std::io::stdin();
-    let mut input = String::new();
-    loop {
-        print!(">> ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        input.clear();
-        stdin.read_line(&mut input)?;
-        let prompt = input.trim();
-        if prompt.is_empty() || prompt == "/exit" {
-            break;
-        }
-        runner.generate(prompt)?;
-    }
+    let app = api::create_router(runner);
+    let addr = "0.0.0.0:3000";
+
+    info!(addr, "LLML API server starting");
+    info!("  POST /v1/chat/completions  — OpenAI-compatible chat endpoint");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
