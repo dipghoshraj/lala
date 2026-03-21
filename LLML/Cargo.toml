@@ -7,3 +7,4 @@ edition = "2024"
 llama_cpp = "0.3.2"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+anyhow = "1.0"
