@@ -39,10 +39,30 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.default.as_u64())
         .unwrap_or(100) as usize;
 
+    let n_gpu_layers = model_cfg.parameters.iter()
+        .find(|p| p.name == "n_gpu_layers")
+        .and_then(|p| p.default.as_u64())
+        .unwrap_or(0) as u32;
+
+    let n_threads = model_cfg.parameters.iter()
+        .find(|p| p.name == "n_threads")
+        .and_then(|p| p.default.as_u64())
+        .unwrap_or(0) as u32;
+
+    let n_ctx = model_cfg.parameters.iter()
+        .find(|p| p.name == "n_ctx")
+        .and_then(|p| p.default.as_u64())
+        .unwrap_or(2048) as u32;
+
+    let n_batch = model_cfg.parameters.iter()
+        .find(|p| p.name == "n_batch")
+        .and_then(|p| p.default.as_u64())
+        .unwrap_or(512) as u32;
+
     // Load the model once; wrap in Arc for shared access across requests.
     let runner = Arc::new(ModelRunner::load(
         &model_cfg.model_path,
-        ModelParams { temperature, max_tokens },
+        ModelParams { temperature, max_tokens, n_gpu_layers, n_threads, n_ctx, n_batch },
     )?);
 
     let app = api::create_router(runner);

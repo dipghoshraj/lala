@@ -7,6 +7,14 @@ use tracing::{debug, error, info, instrument, warn};
 pub struct ModelParams {
     pub temperature: f32,
     pub max_tokens: usize,
+    /// Layers to offload to GPU. 99 = all layers. 0 = CPU-only.
+    pub n_gpu_layers: u32,
+    /// CPU threads for generation. 0 = auto-detect.
+    pub n_threads: u32,
+    /// Context window in tokens.
+    pub n_ctx: u32,
+    /// Batch size for prompt evaluation.
+    pub n_batch: u32,
 }
 
 /// Owns the loaded `LlamaModel`. Load once with [`ModelRunner::load`],
@@ -25,8 +33,19 @@ impl ModelRunner {
     /// Load the GGUF model from `path`. Called exactly once at startup.
     #[instrument(fields(path))]
     pub fn load(path: &str, params: ModelParams) -> anyhow::Result<Self> {
-        info!(path, "loading GGUF model");
-        let model = LlamaModel::load_from_file(path, LlamaParams::default())
+        info!(
+            path,
+            n_gpu_layers = params.n_gpu_layers,
+            n_threads = params.n_threads,
+            n_ctx = params.n_ctx,
+            n_batch = params.n_batch,
+            "loading GGUF model"
+        );
+        let llama_params = LlamaParams {
+            n_gpu_layers: params.n_gpu_layers,
+            ..LlamaParams::default()
+        };
+        let model = LlamaModel::load_from_file(path, llama_params)
             .map_err(|e| {
                 error!(path, error = %e, "failed to load model from file");
                 e
@@ -46,7 +65,24 @@ impl ModelRunner {
         let max = max_tokens.unwrap_or(self.params.max_tokens);
         debug!(prompt_len = prompt.len(), max_tokens = max, "creating inference session");
 
-        let mut session = self.model.create_session(SessionParams::default())
+        // Resolve thread count: 0 means auto-detect from available CPU cores.
+        let n_threads = if self.params.n_threads == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+        } else {
+            self.params.n_threads
+        };
+
+        let session_params = SessionParams {
+            n_ctx: self.params.n_ctx,
+            n_batch: self.params.n_batch,
+            n_threads,
+            n_threads_batch: n_threads,
+            ..SessionParams::default()
+        };
+
+        let mut session = self.model.create_session(session_params)
             .map_err(|e| {
                 error!(error = %e, "failed to create llama session");
                 e
