@@ -12,12 +12,66 @@ use crate::agent::planner::Agent;
 
 // Braille spinner — visible in any modern terminal (Windows Terminal, VS Code, etc.)
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_LABEL: &str = "thinking or you can say simulating pattern recognition";
+
+// ── ANSI colour codes ─────────────────────────────────────────────────────────
+const RESET: &str = "\x1b[0m";
+const BOLD_YELLOW: &str = "\x1b[1;33m"; // reasoning — header & border
+const DIM_YELLOW: &str = "\x1b[2;33m";  // reasoning — body text
+const BOLD_CYAN: &str = "\x1b[1;36m";   // answer — header & border
+const CYAN: &str = "\x1b[36m";          // answer — body text
+const SECTION_WIDTH: usize = 60;
 
 const SYSTEM_PROMPT: &str =
     "You are a friendly AI assistant named lala. \
      Explain things clearly and naturally. \
      Respond in full sentences.";
+
+/// Run `f` while displaying a braille spinner labelled `label`.
+/// Stops and erases the spinner line before returning.
+fn with_spinner<F, T>(label: &str, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let running = Arc::new(AtomicBool::new(true));
+    let spin_flag = Arc::clone(&running);
+    let label_owned = label.to_string();
+    let clear_len = label.len() + 8;
+    let spinner_handle = thread::spawn(move || {
+        let mut i = 0usize;
+        loop {
+            if !spin_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            print!("\r  {} {}...", SPINNER[i % SPINNER.len()], label_owned);
+            io::stdout().flush().ok();
+            i += 1;
+            thread::sleep(Duration::from_millis(80));
+        }
+        print!("\r{}\r", " ".repeat(clear_len));
+        io::stdout().flush().ok();
+    });
+    let result = f();
+    running.store(false, Ordering::Relaxed);
+    spinner_handle.join().ok();
+    result
+}
+
+/// Print a titled section with a coloured header and separator.
+///
+/// ```
+/// ▷ Reasoning
+/// ────────────────────────────────────────────────────────────
+/// [body text]
+/// ────────────────────────────────────────────────────────────
+/// ```
+fn print_section(header: &str, header_color: &str, text_color: &str, content: &str) {
+    let sep = "─".repeat(SECTION_WIDTH);
+    println!("\n{}{} {}{}", header_color, "▷", header, RESET);
+    println!("{}{}{}", header_color, sep, RESET);
+    println!("{}{}{}", text_color, content.trim(), RESET);
+    println!("{}{}{}", header_color, sep, RESET);
+    println!();
+}
 
 pub fn run(api_url: &str) -> anyhow::Result<()> {
     let client = ApiClient::new(api_url);
@@ -61,44 +115,35 @@ pub fn run(api_url: &str) -> anyhow::Result<()> {
             content: input.clone(),
         });
 
-        // ── Spinner ────────────────────────────────────────────────────────
-        let running = Arc::new(AtomicBool::new(true));
-        let spin_flag = Arc::clone(&running);
-        let spinner_handle = thread::spawn(move || {
-            let mut i = 0usize;
-            loop {
-                if !spin_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                print!("\r  {} {}...", SPINNER[i % SPINNER.len()], SPINNER_LABEL);
-                io::stdout().flush().ok();
-                i += 1;
-                thread::sleep(Duration::from_millis(80));
-            }
-            // Erase the spinner line cleanly.
-            print!("\r{}\r", " ".repeat(SPINNER_LABEL.len() + 16));
-            io::stdout().flush().ok();
-        });
+        // ── Step 1: Reasoning ─────────────────────────────────────────────
+        let reasoning_result = with_spinner("reasoning", || agent.run_reasoning(&history));
 
-        let result = agent.run(&history);
-
-        // Stop the spinner before printing anything.
-        running.store(false, Ordering::Relaxed);
-        spinner_handle.join().ok();
-        // ──────────────────────────────────────────────────────────────────
-
-        match result {
-            Ok(reply) => {
-                println!("{}\n", reply);
-                history.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: reply,
-                });
-            }
+        match reasoning_result {
             Err(e) => {
-                eprintln!("Error: {e}\n");
-                // Remove the user turn so history stays consistent.
+                eprintln!("{}Error during reasoning: {}{}\n", BOLD_YELLOW, e, RESET);
                 history.pop();
+                continue;
+            }
+            Ok(analysis) => {
+                print_section("Reasoning", BOLD_YELLOW, DIM_YELLOW, &analysis);
+
+                // ── Step 2: Decision ───────────────────────────────────────
+                let decision_result =
+                    with_spinner("deciding", || agent.run_decision(&history, &analysis));
+
+                match decision_result {
+                    Ok(reply) => {
+                        print_section("Answer", BOLD_CYAN, CYAN, &reply);
+                        history.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: reply,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("{}Error: {}{}\n", BOLD_CYAN, e, RESET);
+                        history.pop();
+                    }
+                }
             }
         }
     }

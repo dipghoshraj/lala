@@ -22,19 +22,20 @@ const DECISION_SYSTEM: &str =
      Use it to inform your answer but do NOT repeat or quote it. \
      Respond directly to the user in clear, natural language.";
 
+/// Combined output from a completed two-step agent turn.
+pub struct AgentOutput {
+    /// Internal analysis from the reasoning model — displayed to the user
+    /// but not stored in conversation history.
+    pub reasoning: String,
+    /// Final reply from the decision model — displayed and stored in history.
+    pub answer: String,
+}
+
 /// Drives a single user turn through the two-step reasoning→decision pipeline.
 ///
-/// # Steps
-///
-/// 1. **Reason** — sends the full conversation history to the `reasoning` model
-///    with a reasoning-specific system prompt. The output is an internal analysis
-///    that is never shown to the user.
-///
-/// 2. **Decide** — sends a condensed prompt to the `decision` model containing:
-///    - the conversation history (system prompt replaced with DECISION_SYSTEM)
-///    - the reasoning output injected as a hidden `system` message
-///
-///    The decision model produces the final reply shown to the user.
+/// `run_reasoning` and `run_decision` are exposed as separate public steps so
+/// the CLI can display each phase (with its own spinner) as it completes.
+/// `run` is a convenience wrapper that executes both steps in sequence.
 pub struct Agent<'a> {
     client: &'a ApiClient,
 }
@@ -44,18 +45,16 @@ impl<'a> Agent<'a> {
         Self { client }
     }
 
-    pub fn run(&self, history: &[ChatMessage]) -> anyhow::Result<String> {
-        // ── Step 1: Reason ────────────────────────────────────────────────
-        // Replace the CLI system prompt with the reasoning-specific one so the
-        // model understands its role for this step.
+    /// Step 1 — send the full history to the reasoning model.
+    /// Returns the internal analysis string; does not modify history.
+    pub fn run_reasoning(&self, history: &[ChatMessage]) -> anyhow::Result<String> {
         let reasoning_history = Self::replace_system(history, REASONING_SYSTEM);
-        let analysis = self.client.reason(&reasoning_history, Some(512))?;
+        self.client.reason(&reasoning_history, Some(512))
+    }
 
-        // ── Step 2: Decide ────────────────────────────────────────────────
-        // Use the decision model's system prompt and inject the reasoning
-        // output as an additional hidden context message before the final
-        // user turn. The decision model has a small context window (512 tokens)
-        // so we only include the last user message, not the full history.
+    /// Step 2 — send a compact context (system + analysis + last user message)
+    /// to the decision model. Returns the final answer string.
+    pub fn run_decision(&self, history: &[ChatMessage], analysis: &str) -> anyhow::Result<String> {
         let last_user = history
             .iter()
             .rfind(|m| m.role == "user")
@@ -77,8 +76,14 @@ impl<'a> Agent<'a> {
             },
         ];
 
-        let answer = self.client.decide(&decision_messages, Some(256))?;
-        Ok(answer)
+        self.client.decide(&decision_messages, Some(256))
+    }
+
+    /// Convenience: run both steps and return combined output.
+    pub fn run(&self, history: &[ChatMessage]) -> anyhow::Result<AgentOutput> {
+        let reasoning = self.run_reasoning(history)?;
+        let answer = self.run_decision(history, &reasoning)?;
+        Ok(AgentOutput { reasoning, answer })
     }
 
     /// Returns a copy of `history` with the first `system` message replaced

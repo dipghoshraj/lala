@@ -33,7 +33,7 @@ Models:
         description: "Batch size for prompt evaluation. Larger = faster prompt processing. 512 is recommended."
         type: "integer"
         default: 512
-    modelPath: "E:\\model-guff\\mistral-7b-v0.1.Q4_K_M.gguf"
+    modelPath: "E:\\model-guff\\deepseek-coder-1.3b-instruct.Q4_K_M.gguf"
 
   - name: "mistral-decision"
     description: "A model optimised for concise, deterministic decision-making and action selection."
@@ -64,4 +64,4 @@ Models:
         description: "Batch size for prompt evaluation."
         type: "integer"
         default: 512
-    modelPath: "E:\\model-guff\\mistral-7b-v0.1.Q4_K_M.gguf"
+    modelPath: "E:\\model-guff\\qwen2.5-3b-instruct-q4_k_m.gguf"
