@@ -1,6 +1,6 @@
 # lala.ai — System Architecture
 
-> **Current state:** Phase 0 in progress — two-binary system (`lala` CLI client + `LLML` inference server) communicating over HTTP. LLML now supports multiple model roles (`reasoning` / `decision`) with per-request temperature overrides. PostgreSQL/pgvector is provisioned but not yet wired into the live request loop.
+> **Current state:** Phase 0 in progress — two-binary system (`lala` CLI client + `LLML` inference server) communicating over HTTP. LLML supports multiple model roles (`reasoning` / `decision`) with per-request temperature overrides. The `lala` agent layer now runs a two-step reasoning→decision planner loop for every user query. PostgreSQL/pgvector is provisioned but not yet wired into the live request loop.
 
 ---
 
@@ -17,7 +17,8 @@ lala.ai/
 │       ├── cli.rs          # REPL loop + spinner + history
 │       └── agent/
 │           ├── mod.rs
-│           └── model.rs    # ApiClient — HTTP wrapper for LLML
+│           ├── model.rs    # ApiClient — HTTP wrapper for LLML
+│           └── planner.rs  # Agent — two-step reasoning→decision loop
 └── LLML/                   # Binary 2 — Inference server
     ├── Cargo.toml
     └── src/
@@ -48,9 +49,11 @@ graph TD
     Registry["ModelRegistry\nrole → ModelRunner"]
 
     User -->|"stdin / rustyline"| Lala
-    Lala -->|"POST /v1/chat/completions\n{model: 'reasoning'|'decision', ...}"| LLML
-    LLML -->|"response JSON"| Lala
-    Lala -->|"print reply"| User
+    Lala -->|"Agent::run() — step 1\nPOST /v1/chat/completions {model:'reasoning'}"| LLML
+    LLML -->|"reasoning JSON"| Lala
+    Lala -->|"Agent::run() — step 2\nPOST /v1/chat/completions {model:'decision'}"| LLML
+    LLML -->|"decision JSON"| Lala
+    Lala -->|"print final reply"| User
 
     Config -->|"read on startup"| LLML
     GGUF -->|"mmap via llama_cpp"| Registry
@@ -111,6 +114,7 @@ sequenceDiagram
     participant rustyline
     participant cli as cli::run()
     participant spinner as spinner thread
+    participant Agent as agent::planner::Agent
     participant ApiClient
 
     User->>rustyline: type input
@@ -123,10 +127,23 @@ sequenceDiagram
     else normal message
         cli->>cli: push ChatMessage{role:"user"} to history
         cli->>spinner: spawn background thread
-        cli->>ApiClient: chat(&history, None, None)\n[model_role=None → server default]
-        ApiClient->>LLML: POST /v1/chat/completions\n{messages:[...]}
-        LLML-->>ApiClient: ChatResponse JSON
-        ApiClient-->>cli: Ok(reply) or Err(e)
+        cli->>Agent: agent.run(&history)
+
+        note over Agent: Step 1 — Reason
+        Agent->>Agent: replace_system(history, REASONING_SYSTEM)
+        Agent->>ApiClient: reason(&reasoning_history, Some(512))
+        ApiClient->>LLML: POST /v1/chat/completions {model:"reasoning"}
+        LLML-->>ApiClient: analysis string
+        ApiClient-->>Agent: Ok(analysis)
+
+        note over Agent: Step 2 — Decide
+        Agent->>Agent: build decision_messages\n[DECISION_SYSTEM, analysis as context, last user msg]
+        Agent->>ApiClient: decide(&decision_messages, Some(256))
+        ApiClient->>LLML: POST /v1/chat/completions {model:"decision"}
+        LLML-->>ApiClient: final answer string
+        ApiClient-->>Agent: Ok(answer)
+        Agent-->>cli: Ok(answer)
+
         cli->>spinner: set running=false
         spinner-->>cli: join (erase spinner line)
 
@@ -161,7 +178,7 @@ The entire vector is sent on every request so the model maintains multi-turn con
 | `reason(&msgs, max_tokens)` | `"reasoning"` | 0.7 (from config) |
 | `decide(&msgs, max_tokens)` | `"decision"` | 0.3 (from config) |
 
-`cli.rs` currently calls `chat(…, None, None)` (server default). The `reason()` / `decide()` methods are ready for the Phase 0 planner loop — see §6.
+`cli.rs` calls `Agent::run(&history)` which internally calls `reason()` then `decide()`. The analysis from the reasoning step is injected as hidden context for the decision step and is never shown to the user.
 
 ---
 
@@ -234,7 +251,72 @@ Returns all registered role names (e.g. `"reasoning"`, `"decision"`) in OpenAI l
 
 ---
 
-## 6. Configuration — `ai-config.yaml`
+## 6. Agent — Two-Step Planner Loop
+
+`lala/src/agent/planner.rs` implements the `Agent` struct that drives every user turn.
+
+### How it works
+
+```
+user query
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 1 — Reason  (model: "reasoning", temp: 0.7)       │
+│  Input:  full conversation history                      │
+│          + REASONING_SYSTEM prompt                      │
+│  Output: internal analysis string  (never shown)        │
+└────────────────────────────┬────────────────────────────┘
+                             │ analysis
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 2 — Decide  (model: "decision", temp: 0.3)        │
+│  Input:  DECISION_SYSTEM prompt                         │
+│          + analysis appended as hidden [system] message │
+│          + last user message                            │
+│  Output: final answer shown to user                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Why two steps?
+
+| Concern | Reasoning model | Decision model |
+|---------|----------------|----------------|
+| Temperature | 0.7 — creative, exploratory | 0.3 — deterministic, concise |
+| Context window | 2048 — can hold full history | 512 — tight, focused on final answer |
+| Job | Think through the problem | Turn analysis into a clean reply |
+| Visible to user | No | Yes |
+
+### Message arrays
+
+**Step 1 input** — full history with the REPL system prompt swapped for `REASONING_SYSTEM`:
+```
+[{role:"system", content:REASONING_SYSTEM}, {role:"user",...}, {role:"assistant",...}, ...]
+```
+
+**Step 2 input** — condensed array (keeps the decision model within its 512-token window):
+```
+[{role:"system", content:DECISION_SYSTEM},
+ {role:"system", content:"[Internal analysis — do not quote this]\n{analysis}"},
+ {role:"user",   content:"{last_user_message}"}]
+```
+
+### `Agent` API
+
+```rust
+pub struct Agent<'a> { client: &'a ApiClient }
+impl<'a> Agent<'a> {
+    pub fn new(client: &'a ApiClient) -> Self
+    pub fn run(&self, history: &[ChatMessage]) -> anyhow::Result<String>
+    fn replace_system(history: &[ChatMessage], new_system: &str) -> Vec<ChatMessage>
+}
+```
+
+`cli.rs` creates one `Agent` per session and calls `agent.run(&history)` on each turn. The reasoning output is internal — it is never pushed into the conversation history.
+
+---
+
+## 7. Configuration — `ai-config.yaml`
 
 Parsed by `LLML/src/loalYaml/loadYaml.rs` into typed structs on startup.
 
@@ -278,7 +360,7 @@ Both point to the same GGUF file (`mistral-7b-v0.1.Q4_K_M.gguf`). Different `Mod
 
 ---
 
-## 7. Model Layer Internals
+## 8. Model Layer Internals
 
 ```mermaid
 classDiagram
@@ -311,7 +393,7 @@ classDiagram
 
 ---
 
-## 8. Prompt Format
+## 9. Prompt Format
 
 `build_prompt()` in `api/mod.rs` converts the OpenAI `messages` array into the Mistral/Llama instruction format:
 
@@ -325,7 +407,7 @@ The output stream is cut early when a `[/INST]` marker appears in generated toke
 
 ---
 
-## 9. HTTP API Reference
+## 10. HTTP API Reference
 
 Both endpoints live on `LLML` at port `3000`.
 
@@ -443,7 +525,7 @@ curl -s http://localhost:3000/v1/models | jq .
 
 ---
 
-## 10. ApiClient — `lala/src/agent/model.rs`
+## 11. ApiClient — `lala/src/agent/model.rs`
 
 The `ApiClient` struct is the sole boundary between `lala` and `LLML`. It uses `reqwest::blocking::Client` (no timeout — CPU inference can be slow).
 
@@ -457,7 +539,7 @@ The `ApiClient` struct is the sole boundary between `lala` and `LLML`. It uses `
 
 ---
 
-## 11. Infrastructure — PostgreSQL + pgvector
+## 12. Infrastructure — PostgreSQL + pgvector
 
 ```mermaid
 flowchart LR
@@ -497,7 +579,7 @@ docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 lala-postgres
 
 ---
 
-## 12. Current vs. Target Architecture
+## 13. Current vs. Target Architecture
 
 ```mermaid
 flowchart TD
@@ -523,8 +605,8 @@ flowchart TD
 | REPL / input | `cli.rs` direct loop | Interface Layer calls `Agent::run()` |
 | Multi-model routing (server) | `ModelRegistry` + role-based routing ✅ | Done |
 | Per-request temperature (server) | Wired through `generate_from_prompt` ✅ | Done |
-| Role selection (client) | `reason()` / `decide()` methods exist ✅ | Needs planner to call them |
-| Two-step agent loop | Single `chat(…, None, None)` call | Agent: `reason()` → parse → `decide()` |
+| Role selection (client) | `reason()` / `decide()` used by `Agent` ✅ | Done |
+| Two-step agent loop | `Agent::run()` — reason → decide ✅ | Done |
 | Prompt building | `api/mod.rs build_prompt()` in LLML | Agent Layer (Executor/Reasoner) |
 | Retrieval | None | RAG Layer `retrieve(query, k)` |
 | Document ingestion | None | RAG Layer `store(text)` |
@@ -532,7 +614,7 @@ flowchart TD
 
 ---
 
-## 13. Key Dependencies
+## 14. Key Dependencies
 
 ### lala
 | Crate | Purpose |

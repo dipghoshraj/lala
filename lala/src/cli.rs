@@ -8,6 +8,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::agent::model::{ApiClient, ChatMessage};
+use crate::agent::planner::Agent;
 
 // Braille spinner — visible in any modern terminal (Windows Terminal, VS Code, etc.)
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -20,6 +21,7 @@ const SYSTEM_PROMPT: &str =
 
 pub fn run(api_url: &str) -> anyhow::Result<()> {
     let client = ApiClient::new(api_url);
+    let agent = Agent::new(&client);
     let mut rl = DefaultEditor::new()?;
 
     // Conversation history — system prompt is permanently at index 0.
@@ -78,7 +80,7 @@ pub fn run(api_url: &str) -> anyhow::Result<()> {
             io::stdout().flush().ok();
         });
 
-        let result = client.chat(&history, None, None);
+        let result = agent.run(&history);
 
         // Stop the spinner before printing anything.
         running.store(false, Ordering::Relaxed);
