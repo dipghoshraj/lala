@@ -6,19 +6,23 @@ Message processing pipeline
 1.  Auth guard (applied via @authorized_only decorator in app.py wiring)
 2.  Send "typing…" action so the user knows the bot is working
 3.  Build the full message list (system prompt + history + current query)
-4.  Call LLML "reasoning" model  →  structured log (INFO, never sent to user)
-5.  Augment messages with the reasoning context
-6.  Call LLML "decision" model   →  reply sent back to the user
-7.  Commit user message + decision to conversation history
+4.  Classify route (when SMART_ROUTER=1):
+      └─ "direct"    → skip to decision, reply to user (steps 7–8)
+      └─ "reasoning" → continue to full pipeline below
+5.  Call LLML "reasoning" model  →  structured log (INFO, never sent to user)
+6.  Augment messages with the reasoning context
+7.  Call LLML "decision" model   →  reply sent back to the user
+8.  Commit user message + decision to conversation history
 
 /clear resets that user's conversation history.
 """
 from __future__ import annotations
 
+import html
 import logging
 
 from telegram import Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
 from agent.client import LLMLClient, LLMLError
@@ -53,6 +57,41 @@ class Handlers:
         self._client = client
         self._store = store
         self._cfg = config
+
+    # ------------------------------------------------------------------
+    # Formatting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_response(reasoning: str | None, answer: str) -> tuple[str, str | None]:
+        """
+        Build the reply text and parse_mode for a given (reasoning, answer) pair.
+
+        When reasoning is present the message uses Telegram HTML:
+
+            [tap to reveal]  ← tg-spoiler containing the reasoning
+            ​
+            💬 Answer
+            [answer text]
+
+        The spoiler is collapsed by default so users who don't need to see
+        the internal thinking can ignore it entirely.
+
+        Returns (text, parse_mode).  parse_mode is ``ParseMode.HTML`` when
+        reasoning is present, ``None`` for plain-text direct replies.
+        """
+        if not reasoning:
+            return answer, None
+
+        r = html.escape(reasoning.strip())
+        a = html.escape(answer.strip())
+
+        text = (
+            f'<tg-spoiler><b>\U0001f9e0 Reasoning</b>\n\n{r}</tg-spoiler>'
+            f"\n\n"
+            f"<b>\U0001f4ac Answer</b>\n\n{a}"
+        )
+        return text, ParseMode.HTML
 
     # ------------------------------------------------------------------
     # Command handlers
@@ -114,14 +153,19 @@ class Handlers:
         messages = self._store.build_messages(user_id, user_text)
 
         # ── Router: ask LLML whether reasoning is needed ──────────────────
+        # Only fires when SMART_ROUTER=1; otherwise every query goes through
+        # the full reasoning pipeline unchanged.
         # Pass the last 2 history turns (excluding the system prompt and the
         # just-appended user message) so the server can handle follow-ups.
-        history_context = [m for m in messages[1:-1]][-2:]
-        route = self._client.classify(user_text, context=history_context)
-        logger.info(
-            "classify",
-            extra={"user_id": user_id, "route": route},
-        )
+        if self._cfg.smart_router:
+            history_context = [m for m in messages[1:-1]][-2:]
+            route = self._client.classify(user_text, context=history_context)
+            logger.info(
+                "classify",
+                extra={"user_id": user_id, "route": route},
+            )
+        else:
+            route = "reasoning"
 
         if route == "direct":
             # Skip reasoning entirely — go straight to decision.
@@ -206,7 +250,8 @@ class Handlers:
 
         # ── Step 3: Commit & reply ────────────────────────────────────────
         self._store.commit(user_id, user_text, decision)
-        await update.message.reply_text(decision)
+        reply_text, parse_mode = self._format_response(reasoning, decision)
+        await update.message.reply_text(reply_text, parse_mode=parse_mode)
 
     # ------------------------------------------------------------------
     # Error handler

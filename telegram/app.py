@@ -43,6 +43,7 @@ def main() -> None:
         extra={
             "llml_api_url": cfg.llml_api_url,
             "authorized_user_id": cfg.authorized_user_id,
+            "smart_router": cfg.smart_router,
         },
     )
 
