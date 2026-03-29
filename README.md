@@ -128,28 +128,42 @@ lala.ai/
 
 ## System Map
 
-```
-User
- │ stdin (rustyline)
- ▼
-lala/src/cli.rs           resolves LLML_API_URL + LALA_SMART_ROUTER, REPL loop
-lala/src/agent/planner.rs classify_query() → run_direct() | run_reasoning()+run_decision()
-lala/src/agent/model.rs   ApiClient — reqwest::blocking POST /v1/chat/completions
-                                                         POST /v1/classify
- │ HTTP
- ▼
-LLML/main.py              reads ai-config.yaml, loads models, starts uvicorn :3000
-LLML/api/routes.py        POST /v1/chat/completions (non-streaming + SSE streaming)
-                          POST /v1/classify          (LLM meta-classifier)
-                          GET  /v1/models
-LLML/api/classifier.py    heuristic_route() + CLASSIFIER_SYSTEM prompt
-LLML/model/runner.py      ModelRunner.generate() / .stream()  [asyncio.to_thread]
- │ llama-cpp-python C FFI
- ▼
-*.gguf model file (local filesystem, path from ai-config.yaml)
-```
+```mermaid
+flowchart TD
+    User(["👤 User\nstdin / rustyline"])
+    TGUser(["👤 User\nTelegram"])
 
-Telegram bot follows the same HTTP path: `telegram/agent/client.py` → LLML.
+    subgraph lala ["lala — Rust CLI"]
+        CLI["cli.rs\nREPL loop · LALA_SMART_ROUTER"]
+        Planner["agent/planner.rs\nclassify_query()\nrun_direct() | run_reasoning()+run_decision()"]
+        ApiClient["agent/model.rs\nApiClient\nreqwest::blocking"]
+    end
+
+    subgraph TGBot ["telegram — Python bot"]
+        TGClient["agent/client.py\nLLMLClient"]
+    end
+
+    subgraph LLML ["LLML — Python/FastAPI :3000"]
+        Routes["api/routes.py\nPOST /v1/chat/completions\nPOST /v1/classify\nGET  /v1/models"]
+        Classifier["api/classifier.py\nheuristic_route()"]
+        Runner["model/runner.py\nModelRunner.generate() / .stream()\nasyncio.to_thread"]
+    end
+
+    GGUF[("*.gguf\nmodel file")]
+    Config["ai-config.yaml"]
+
+    User --> CLI
+    CLI --> Planner
+    Planner --> ApiClient
+    ApiClient -->|"HTTP"| Routes
+    Routes --> Classifier
+    Routes --> Runner
+    Runner -->|"llama-cpp-python FFI"| GGUF
+    Config -->|"read on startup"| LLML
+
+    TGUser --> TGClient
+    TGClient -->|"HTTP"| Routes
+```
 
 ---
 
@@ -157,21 +171,24 @@ Telegram bot follows the same HTTP path: `telegram/agent/client.py` → LLML.
 
 Every query is classified before inference to decide whether multi-step reasoning is needed.
 
-```
-incoming query
-      │
-      ▼
- POST /v1/classify  ──► heuristic fast-path (greetings → "direct", no LLM call)
-      │                       │
-      │           LLM path    │
-      └───────────────────────┘
-             │              │
-          "direct"      "reasoning"
-             │              │
-             ▼              ▼
-        run_direct()   run_reasoning()
-        (decision       then
-         model only)   run_decision()
+```mermaid
+flowchart TD
+    Q(["incoming query"])
+    Classify["POST /v1/classify"]
+    Heuristic["heuristic fast-path\ngreetings → direct\nno LLM call"]
+    LLM["LLM classifier\nreasoning model"]
+    Direct["run_direct()\ndecision model only"]
+    Reason["run_reasoning()\nthen run_decision()"]
+    Out(["reply to user"])
+
+    Q --> Classify
+    Classify --> Heuristic
+    Classify --> LLM
+    Heuristic -->|"direct"| Direct
+    LLM -->|"direct"| Direct
+    LLM -->|"reasoning"| Reason
+    Direct --> Out
+    Reason --> Out
 ```
 
 | Route | Path | Use case |
