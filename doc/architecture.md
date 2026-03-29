@@ -9,6 +9,7 @@
 ```
 lala.ai/
 ├── ai-config.yaml          # Shared model configuration (read by LLML at startup)
+├── LLML.Dockerfile         # LLML inference server Docker image (CPU; GPU-ready)
 ├── psql.Dockerfile         # PostgreSQL 18 + pgvector image
 ├── lala/                   # Rust CLI client
 │   ├── Cargo.toml
@@ -624,6 +625,14 @@ flowchart LR
 
 Docker setup:
 ```sh
+# LLML inference server
+docker build -f LLML.Dockerfile -t lala-llml .
+docker run -p 3000:3000 \
+  -v /path/to/models:/models \
+  -v ./ai-config.yaml:/app/ai-config.yaml \
+  lala-llml
+
+# PostgreSQL + pgvector
 docker build -f psql.Dockerfile -t lala-postgres .
 docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 lala-postgres
 ```

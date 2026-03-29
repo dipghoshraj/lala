@@ -16,6 +16,26 @@ PostgreSQL + pgvector is provisioned for RAG storage (Phase 1+).
 
 ### 1. Start the inference server
 
+**Option A — Docker (recommended)**
+
+```sh
+# Build the image (from repo root)
+docker build -f LLML.Dockerfile -t lala-llml .
+
+# Run — mount your models directory and (optionally) override the config
+docker run -p 3000:3000 \
+  -v /path/to/your/models:/models \
+  -v ./ai-config.yaml:/app/ai-config.yaml \
+  lala-llml
+```
+
+Before running, set `modelPath` values in `ai-config.yaml` to container paths:
+```yaml
+modelPath: "/models/your-model.Q4_K_M.gguf"
+```
+
+**Option B — Local Python**
+
 ```sh
 cd LLML
 pip install -r requirements.txt
@@ -49,6 +69,21 @@ docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 lala-postgres
 # DATABASE_URL=postgres://postgres:postgres@localhost:5432/lala
 ```
 
+### Running all services together
+
+```sh
+# Terminal 1 — inference server (Docker)
+docker build -f LLML.Dockerfile -t lala-llml .
+docker run -p 3000:3000 -v /path/to/models:/models lala-llml
+
+# Terminal 2 — PostgreSQL
+docker build -f psql.Dockerfile -t lala-postgres .
+docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 lala-postgres
+
+# Terminal 3 — CLI client
+cd lala && cargo run
+```
+
 ---
 
 ## Repository Layout
@@ -56,6 +91,7 @@ docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 lala-postgres
 ```
 lala.ai/
 ├── ai-config.yaml          # Model configuration shared by all components
+├── LLML.Dockerfile         # LLML inference server Docker image
 ├── psql.Dockerfile         # PostgreSQL 18 + pgvector image
 ├── lala/                   # Rust CLI client
 │   ├── Cargo.toml

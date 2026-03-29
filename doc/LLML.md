@@ -147,29 +147,51 @@ Inference is blocking (CPU-bound). The handler uses `tokio::task::spawn_blocking
 
 ## Build & Run
 
+### Docker (recommended)
+
 ```sh
-# Debug build
-cd LLML && cargo build
+# Build the image from the repo root
+docker build -f LLML.Dockerfile -t lala-llml .
 
-# Release build (significantly faster inference)
-cd LLML && cargo build --release
+# Run — mount your GGUF models directory
+docker run -p 3000:3000 \
+  -v /path/to/your/models:/models \
+  -v ./ai-config.yaml:/app/ai-config.yaml \
+  lala-llml
+```
 
-# Run (reads ../ai-config.yaml relative to the LLML/ directory)
-cargo run --release
-# or
-cargo run --release -- ../ai-config.yaml
+Update `modelPath` values in `ai-config.yaml` to use the container path before running:
+```yaml
+modelPath: "/models/your-model.Q4_K_M.gguf"
+```
+
+GPU (CUDA) support: uncomment the `CMAKE_ARGS` line in `LLML.Dockerfile` and switch to a `nvidia/cuda` base image.
+
+### Local Python
+
+```sh
+cd LLML
+pip install -r requirements.txt
+
+# Reads ../ai-config.yaml by default; serves on :3000
+python main.py
+
+# Custom config path and port
+python main.py --config /path/to/ai-config.yaml --port 3000
 ```
 
 Server starts on `0.0.0.0:3000` by default.
 
 ### Logging
 
-Controlled via `RUST_LOG`:
+Controlled via the `PYTHONUNBUFFERED` env var and standard Python logging. Log level is `INFO` by default:
 
 ```sh
-RUST_LOG=info  cargo run --release        # default — key lifecycle events
-RUST_LOG=LLML=debug  cargo run --release  # include per-request debug detail
-RUST_LOG=debug cargo run --release        # full trace including deps
+# Docker — stream logs to stdout
+docker run --rm -p 3000:3000 -v /path/to/models:/models lala-llml
+
+# Local — already streams to stdout via logging.basicConfig
+PYTHONUNBUFFERED=1 python main.py
 ```
 
 ---
