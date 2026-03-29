@@ -1,4 +1,4 @@
-use crate::agent::model::{ApiClient, ChatMessage};
+use crate::agent::model::{ApiClient, ChatMessage, RouteDecision};
 
 // ── Query classifier ──────────────────────────────────────────────────────────
 
@@ -131,9 +131,47 @@ impl<'a> Agent<'a> {
         self.client.decide(&decision_messages, Some(256))
     }
 
+    /// Ask the LLML server to classify the query via `POST /v1/classify`.
+    ///
+    /// Passes the last two history turns as context so the server can handle
+    /// follow-up queries correctly (e.g. "why?" after a complex answer).
+    ///
+    /// Falls back to the local heuristic (`needs_reasoning`) on any error so
+    /// the REPL keeps working even when the server is temporarily unreachable.
+    pub fn classify_query(
+        &self,
+        input: &str,
+        history: &[ChatMessage],
+    ) -> RouteDecision {
+        // Extract last ≤2 non-system turns as context for the server.
+        let context: Vec<ChatMessage> = history
+            .iter()
+            .filter(|m| m.role != "system")
+            .rev()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        match self.client.classify(input, &context) {
+            Ok(decision) => decision,
+            Err(e) => {
+                // Log silently and fall back to the local heuristic.
+                eprintln!("[classify] server error, falling back to heuristic: {e}");
+                if needs_reasoning(input) {
+                    RouteDecision::Reasoning
+                } else {
+                    RouteDecision::Direct
+                }
+            }
+        }
+    }
+
     /// Direct path — skips reasoning and sends the full conversation history
     /// straight to the decision model under its normal system prompt.
-    /// Used for simple or conversational queries classified by `needs_reasoning()`.
+    /// Used for simple or conversational queries classified by `classify_query()`.
     pub fn run_direct(&self, history: &[ChatMessage]) -> anyhow::Result<String> {
         let decision_messages = Self::replace_system(history, DECISION_SYSTEM);
         self.client.decide(&decision_messages, Some(256))

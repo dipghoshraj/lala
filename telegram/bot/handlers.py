@@ -113,6 +113,37 @@ class Handlers:
         # Build full message list for this turn
         messages = self._store.build_messages(user_id, user_text)
 
+        # ── Router: ask LLML whether reasoning is needed ──────────────────
+        # Pass the last 2 history turns (excluding the system prompt and the
+        # just-appended user message) so the server can handle follow-ups.
+        history_context = [m for m in messages[1:-1]][-2:]
+        route = self._client.classify(user_text, context=history_context)
+        logger.info(
+            "classify",
+            extra={"user_id": user_id, "route": route},
+        )
+
+        if route == "direct":
+            # Skip reasoning entirely — go straight to decision.
+            try:
+                decision = self._client.decide(
+                    messages,
+                    max_tokens=self._cfg.decision_max_tokens,
+                )
+            except LLMLError as exc:
+                logger.error(
+                    "decision model error (direct path)",
+                    extra={"user_id": user_id, "error": str(exc)},
+                )
+                await update.message.reply_text(
+                    "Sorry, I'm having trouble reaching the AI server. Please try again shortly."
+                )
+                return
+
+            self._store.commit(user_id, user_text, decision)
+            await update.message.reply_text(decision)
+            return
+
         # ── Step 1: Reasoning (logged only) ──────────────────────────────
         reasoning: str | None = None
         try:

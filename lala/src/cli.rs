@@ -7,7 +7,7 @@ use std::time::Duration;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-use crate::agent::model::{ApiClient, ChatMessage};
+use crate::agent::model::{ApiClient, ChatMessage, RouteDecision};
 use crate::agent::planner::{Agent, needs_reasoning};
 
 // Braille spinner — visible in any modern terminal (Windows Terminal, VS Code, etc.)
@@ -73,7 +73,7 @@ fn print_section(header: &str, header_color: &str, text_color: &str, content: &s
     println!();
 }
 
-pub fn run(api_url: &str) -> anyhow::Result<()> {
+pub fn run(api_url: &str, smart_router: bool) -> anyhow::Result<()> {
     let client = ApiClient::new(api_url);
     let agent = Agent::new(&client);
     let mut rl = DefaultEditor::new()?;
@@ -85,6 +85,9 @@ pub fn run(api_url: &str) -> anyhow::Result<()> {
     }];
 
     println!("lala  —  connected to {api_url}");
+    if smart_router {
+        println!("Router: LLM classifier (LALA_SMART_ROUTER=1)");
+    }
     println!("Commands: /clear  reset conversation | /exit  quit\n");
 
     loop {
@@ -115,8 +118,16 @@ pub fn run(api_url: &str) -> anyhow::Result<()> {
             content: input.clone(),
         });
 
-        // ── Router: skip reasoning for simple / conversational queries ────
-        if !needs_reasoning(&input) {
+        // ── Router: classify query to skip reasoning when not needed ──────
+        let route = if smart_router {
+            agent.classify_query(&input, &history)
+        } else if needs_reasoning(&input) {
+            RouteDecision::Reasoning
+        } else {
+            RouteDecision::Direct
+        };
+
+        if route == RouteDecision::Direct {
             let result = with_spinner("thinking", || agent.run_direct(&history));
             match result {
                 Ok(reply) => {

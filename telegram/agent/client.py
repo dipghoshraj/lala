@@ -71,6 +71,48 @@ class LLMLClient:
         """Call the *decision* model.  Returns the final answer text."""
         return self._chat("decision", messages, max_tokens)
 
+    def classify(
+        self,
+        query: str,
+        context: list[Message] | None = None,
+    ) -> str:
+        """
+        Call ``POST /v1/classify`` and return ``"direct"`` or ``"reasoning"``.
+
+        Parameters
+        ----------
+        query:
+            The user's input text.
+        context:
+            Optional last few conversation turns.  Pass the tail of the
+            conversation history so the server can handle follow-up queries
+            correctly (e.g. "why?" after a complex answer).
+
+        Returns
+        -------
+        ``"direct"`` or ``"reasoning"``.  On any error returns ``"reasoning"``
+        (fail-closed — the full pipeline is always safe to run).
+        """
+        url = f"{self._base_url}/v1/classify"
+        payload: dict[str, Any] = {"query": query}
+        if context:
+            payload["context"] = context[-2:]  # send at most 2 turns
+
+        try:
+            resp = self._session.post(url, json=payload, timeout=self._timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            route = data.get("route", "reasoning")
+            logger.debug(
+                "classify",
+                extra={"route": route, "confidence": data.get("confidence", "?")},
+            )
+            return route if route in ("direct", "reasoning") else "reasoning"
+        except Exception as exc:  # noqa: BLE001
+            # Any failure → safe default: run the full reasoning pipeline
+            logger.warning("classify failed, defaulting to reasoning: %s", exc)
+            return "reasoning"
+
     def close(self) -> None:
         self._session.close()
 

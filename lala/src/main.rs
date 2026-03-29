@@ -8,5 +8,11 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("LLML_API_URL").ok())
         .unwrap_or_else(|| "http://localhost:3000".to_string());
 
-    cli::run(&api_url)
+    // Set LALA_SMART_ROUTER=1 to enable LLM-based query classification.
+    // Unset or any other value keeps the local heuristic.
+    let smart_router = std::env::var("LALA_SMART_ROUTER")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+
+    cli::run(&api_url, smart_router)
 }

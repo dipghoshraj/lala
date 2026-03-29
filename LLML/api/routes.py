@@ -18,6 +18,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from api.classifier import CLASSIFIER_SYSTEM, heuristic_route
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -68,6 +70,19 @@ class ModelInfo(BaseModel):
 class ModelListResponse(BaseModel):
     object: str = "list"
     data: list[ModelInfo]
+
+
+class ClassifyRequest(BaseModel):
+    query: str
+    # Last few conversation turns for follow-up context (optional).
+    context: list[ChatMessage] = []
+    # Which model role to use for classification; defaults to "reasoning".
+    model: str | None = None
+
+
+class ClassifyResponse(BaseModel):
+    route: str          # "direct" | "reasoning"
+    confidence: str     # "llm" | "heuristic"
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -308,3 +323,85 @@ async def _stream_sse(
     }
     yield f"data: {json.dumps(stop_chunk)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+# ── /v1/classify ──────────────────────────────────────────────────────────────
+
+
+@router.post("/v1/classify")
+async def classify_query(
+    request: Request,
+    req: ClassifyRequest,
+) -> JSONResponse:
+    """
+    Classify a query as ``"direct"`` (no reasoning needed) or ``"reasoning"``.
+
+    Two-path logic
+    --------------
+    1. **Heuristic fast-path** — for social/greeting patterns we return
+       immediately without touching the LLM (``confidence: "heuristic"``).
+    2. **LLM path** — for everything else, call the reasoning model with a
+       tight 5-token budget and a binary-answer system prompt.  On any failure
+       we fall back to the heuristic and still return 200.
+
+    Request body
+    ------------
+    ``query``   (str, required)   — the user's input text.
+    ``context`` (list, optional)  — last few conversation turns for follow-up
+                                    awareness (e.g. "why?" after a complex answer).
+    ``model``   (str, optional)   — override the reasoning model role.
+    """
+    query = req.query.strip()
+    if not query:
+        return JSONResponse({"error": "query must not be empty"}, status_code=400)
+
+    # ── Fast-path: heuristic handles greetings without burning LLM time ───────
+    fast = heuristic_route(query)
+    if fast == "direct":
+        logger.info("classify fast-path  route=direct  query_len=%d", len(query))
+        return JSONResponse(ClassifyResponse(route="direct", confidence="heuristic").model_dump())
+
+    # ── LLM path ──────────────────────────────────────────────────────────────
+    registry = request.app.state.registry
+
+    # Resolve model: requested role → "reasoning" → first registered
+    role = req.model or "reasoning"
+    runner = registry.get(role)
+    if runner is None:
+        first = registry.first()
+        if first is None:
+            # No models at all — fall back to heuristic
+            logger.warning("classify: no models available, using heuristic")
+            return JSONResponse(
+                ClassifyResponse(route=fast, confidence="heuristic").model_dump()
+            )
+        role, runner = first
+
+    # Build a minimal message list: system + last ≤2 context turns + user query
+    context_tail = req.context[-2:] if req.context else []
+    classify_messages = [
+        ChatMessage(role="system", content=CLASSIFIER_SYSTEM),
+        *context_tail,
+        ChatMessage(role="user", content=query),
+    ]
+
+    prompt = build_prompt(classify_messages)
+
+    try:
+        # Temperature 0 → deterministic; 5 tokens is enough for one word
+        raw: str = await runner.generate(prompt, max_tokens=5, temperature=0.0)
+        route = "reasoning" if "REASON" in raw.strip().upper() else "direct"
+        confidence = "llm"
+        logger.info(
+            "classify llm  route=%s  raw=%r  query_len=%d",
+            route,
+            raw.strip(),
+            len(query),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Any inference error → fall back silently so callers always get a 200
+        logger.warning("classify llm error, falling back to heuristic: %s", exc)
+        route = fast
+        confidence = "heuristic"
+
+    return JSONResponse(ClassifyResponse(route=route, confidence=confidence).model_dump())
