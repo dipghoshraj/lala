@@ -8,7 +8,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::agent::model::{ApiClient, ChatMessage};
-use crate::agent::planner::Agent;
+use crate::agent::planner::{Agent, needs_reasoning};
 
 // Braille spinner — visible in any modern terminal (Windows Terminal, VS Code, etc.)
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -114,6 +114,25 @@ pub fn run(api_url: &str) -> anyhow::Result<()> {
             role: "user".to_string(),
             content: input.clone(),
         });
+
+        // ── Router: skip reasoning for simple / conversational queries ────
+        if !needs_reasoning(&input) {
+            let result = with_spinner("thinking", || agent.run_direct(&history));
+            match result {
+                Ok(reply) => {
+                    print_section("Answer", BOLD_CYAN, CYAN, &reply);
+                    history.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: reply,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("{}Error: {}{}", BOLD_CYAN, e, RESET);
+                    history.pop();
+                }
+            }
+            continue;
+        }
 
         // ── Step 1: Reasoning ─────────────────────────────────────────────
         let reasoning_result = with_spinner("reasoning", || agent.run_reasoning(&history));

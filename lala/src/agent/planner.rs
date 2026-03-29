@@ -1,5 +1,66 @@
 use crate::agent::model::{ApiClient, ChatMessage};
 
+// ── Query classifier ──────────────────────────────────────────────────────────
+
+/// Greeting / social phrases that never warrant reasoning.
+const DIRECT_PATTERNS: &[&str] = &[
+    "hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye",
+    "good morning", "good evening", "good night", "good afternoon",
+    "ok", "okay", "sure", "yes", "no", "great", "perfect", "nice",
+    "cool", "awesome", "got it", "understood",
+];
+
+/// Keywords that signal the query needs multi-step reasoning.
+const REASONING_TRIGGERS: &[&str] = &[
+    "why", "how", "explain", "analyze", "analyse", "compare",
+    "difference", "what if", "implement", "write", "debug", "fix",
+    "code", "algorithm", "calculate", "evaluate", "pros", "cons",
+    "summarize", "summarise", "describe", "define", "plan", "design",
+    "architecture", "step", "process", "reasoning", "derive", "prove",
+    "optimise", "optimize", "refactor", "suggest", "recommend",
+];
+
+/// Returns `true` if the query warrants running through the reasoning step.
+///
+/// Routing logic (in priority order):
+/// 1. Matches a direct/social pattern → `false`
+/// 2. ≤ 3 words and no reasoning trigger → `false`
+/// 3. Contains a reasoning trigger keyword → `true`
+/// 4. ≤ 8 words and no trigger → `false`
+/// 5. Longer queries default to reasoning → `true`
+pub fn needs_reasoning(input: &str) -> bool {
+    let lower = input.trim().to_lowercase();
+
+    // 1 — social / greeting patterns are always direct
+    for pat in DIRECT_PATTERNS {
+        if lower == *pat || lower.starts_with(&format!("{} ", pat)) {
+            return false;
+        }
+    }
+
+    let word_count = input.split_whitespace().count();
+
+    // 2 — very short queries without a trigger go direct
+    if word_count <= 3 && !REASONING_TRIGGERS.iter().any(|t| lower.contains(t)) {
+        return false;
+    }
+
+    // 3 — explicit reasoning trigger present
+    if REASONING_TRIGGERS.iter().any(|t| lower.contains(t)) {
+        return true;
+    }
+
+    // 4 — medium queries with no trigger go direct
+    if word_count <= 8 {
+        return false;
+    }
+
+    // 5 — longer queries default to reasoning
+    true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// System prompt injected for the reasoning step.
 ///
 /// The reasoning model's job is to silently think through the query —
@@ -21,15 +82,6 @@ const DECISION_SYSTEM: &str =
      You have been given an internal analysis to guide you. \
      Use it to inform your answer but do NOT repeat or quote it. \
      Respond directly to the user in clear, natural language.";
-
-/// Combined output from a completed two-step agent turn.
-pub struct AgentOutput {
-    /// Internal analysis from the reasoning model — displayed to the user
-    /// but not stored in conversation history.
-    pub reasoning: String,
-    /// Final reply from the decision model — displayed and stored in history.
-    pub answer: String,
-}
 
 /// Drives a single user turn through the two-step reasoning→decision pipeline.
 ///
@@ -79,11 +131,12 @@ impl<'a> Agent<'a> {
         self.client.decide(&decision_messages, Some(256))
     }
 
-    /// Convenience: run both steps and return combined output.
-    pub fn run(&self, history: &[ChatMessage]) -> anyhow::Result<AgentOutput> {
-        let reasoning = self.run_reasoning(history)?;
-        let answer = self.run_decision(history, &reasoning)?;
-        Ok(AgentOutput { reasoning, answer })
+    /// Direct path — skips reasoning and sends the full conversation history
+    /// straight to the decision model under its normal system prompt.
+    /// Used for simple or conversational queries classified by `needs_reasoning()`.
+    pub fn run_direct(&self, history: &[ChatMessage]) -> anyhow::Result<String> {
+        let decision_messages = Self::replace_system(history, DECISION_SYSTEM);
+        self.client.decide(&decision_messages, Some(256))
     }
 
     /// Returns a copy of `history` with the first `system` message replaced
