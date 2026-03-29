@@ -1,6 +1,6 @@
 # lala.ai — System Architecture
 
-> **Current state:** Phase 0 in progress — two-binary system (`lala` CLI client + `LLML` inference server) communicating over HTTP. LLML supports multiple model roles (`reasoning` / `decision`) with per-request temperature overrides. The `lala` agent layer now runs a two-step reasoning→decision planner loop for every user query. PostgreSQL/pgvector is provisioned but not yet wired into the live request loop.
+> **Current state:** Phase 0 in progress — three-component system (`lala` Rust CLI + `LLML` Python inference server + `telegram` Python bot) communicating over HTTP. LLML serves an OpenAI-compatible API with two model roles (`reasoning` / `decision`) and a query-classification endpoint (`/v1/classify`). A smart query router in each client skips the reasoning step for simple or conversational queries. PostgreSQL/pgvector is provisioned but not yet wired into the live request loop.
 
 ---
 
@@ -10,28 +10,35 @@
 lala.ai/
 ├── ai-config.yaml          # Shared model configuration (read by LLML at startup)
 ├── psql.Dockerfile         # PostgreSQL 18 + pgvector image
-├── lala/                   # Binary 1 — CLI client
+├── lala/                   # Rust CLI client
 │   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs         # Entry point
-│       ├── cli.rs          # REPL loop + spinner + history
+│       ├── main.rs         # Entry point — resolves API URL + LALA_SMART_ROUTER flag
+│       ├── cli.rs          # REPL loop, spinner, conversation history
 │       └── agent/
 │           ├── mod.rs
-│           ├── model.rs    # ApiClient — HTTP wrapper for LLML
-│           └── planner.rs  # Agent — two-step reasoning→decision loop
-└── LLML/                   # Binary 2 — Inference server
-    ├── Cargo.toml
-    └── src/
-        ├── main.rs         # Entry point — loads config, starts Axum
-        ├── api/
-        │   └── mod.rs      # Router, handlers, prompt builder, OpenAI-compatible types
-        ├── model/
-        │   ├── mod.rs
-        │   ├── model.rs    # ModelRunner — wraps llama_cpp
-        │   └── registry.rs # ModelRegistry — role → ModelRunner map
-        └── loalYaml/
-            ├── mod.rs
-            └── loadYaml.rs # Deserializes ai-config.yaml
+│           ├── model.rs    # ApiClient — HTTP wrapper (chat, classify); RouteDecision enum
+│           └── planner.rs  # Agent — query router, reasoning→decision pipeline
+├── LLML/                   # Python inference server (FastAPI + llama-cpp-python)
+│   ├── main.py             # Entry point — loads config, starts uvicorn on :3000
+│   ├── config.py           # Deserializes ai-config.yaml → ModelParams
+│   ├── requirements.txt
+│   ├── model/
+│   │   ├── runner.py       # ModelRunner — generate() + stream() via asyncio.to_thread
+│   │   └── registry.py     # ModelRegistry: role (str) → ModelRunner
+│   └── api/
+│       ├── routes.py       # Router: /v1/chat/completions, /v1/models, /v1/classify
+│       └── classifier.py   # Shared heuristic + CLASSIFIER_SYSTEM prompt constant
+└── telegram/               # Telegram bot client
+    ├── app.py              # Entry point — wires handlers, starts long-polling
+    ├── config.py           # Config from environment variables (incl. SMART_ROUTER)
+    ├── requirements.txt
+    ├── agent/
+│   ├── client.py       # LLMLClient — reason(), decide(), classify()
+│   └── conversation.py # Per-user rolling conversation history (thread-safe)
+    └── bot/
+        ├── handlers.py     # Pipeline: classify → direct | reason→decide; spoiler formatting
+        └── middleware.py   # Auth guard
 ```
 
 ---
@@ -41,23 +48,33 @@ lala.ai/
 ```mermaid
 graph TD
     User["👤 User (terminal)"]
-    Lala["lala\nCLI binary"]
-    LLML["LLML\nInference server\n:3000"]
+    TGUser["👤 User (Telegram)"]
+    Lala["lala\nRust CLI"]
+    TGBot["telegram/\nPython bot"]
+    LLML["LLML\nPython/FastAPI\n:3000"]
     Config["ai-config.yaml\n(2 model roles)"]
     GGUF["*.gguf model files\n(local filesystem)"]
     DB[("PostgreSQL\n+ pgvector\n:5432")]
     Registry["ModelRegistry\nrole → ModelRunner"]
+    Classifier["classifier.py\nheuristic + LLM"]
 
     User -->|"stdin / rustyline"| Lala
-    Lala -->|"Agent::run() — step 1\nPOST /v1/chat/completions {model:'reasoning'}"| LLML
-    LLML -->|"reasoning JSON"| Lala
-    Lala -->|"Agent::run() — step 2\nPOST /v1/chat/completions {model:'decision'}"| LLML
-    LLML -->|"decision JSON"| Lala
-    Lala -->|"print final reply"| User
+    Lala -->|"POST /v1/classify"| LLML
+    Lala -->|"POST /v1/chat/completions {model:'reasoning'}"| LLML
+    Lala -->|"POST /v1/chat/completions {model:'decision'}"| LLML
+    LLML -->|"JSON responses"| Lala
+    Lala -->|"print reply"| User
+
+    TGUser -->|"Telegram message"| TGBot
+    TGBot -->|"POST /v1/classify"| LLML
+    TGBot -->|"POST /v1/chat/completions"| LLML
+    LLML -->|"JSON responses"| TGBot
+    TGBot -->|"reply (spoiler + answer)"| TGUser
 
     Config -->|"read on startup"| LLML
-    GGUF -->|"mmap via llama_cpp"| Registry
+    GGUF -->|"mmap via llama-cpp-python"| Registry
     LLML --> Registry
+    LLML --> Classifier
 
     DB -.->|"planned — RAG + memory"| Lala
 
@@ -84,17 +101,18 @@ URL resolution order:
 2. `LLML_API_URL` environment variable
 3. Fallback: `http://localhost:3000`
 
-`main()` calls `cli::run(&api_url)` — that's the only thing it does.
+`main()` also reads `LALA_SMART_ROUTER` — if set to `"1"`, the LLM-based classifier is used instead of the local heuristic. Both values are passed to `cli::run(&api_url, smart_router)`.
 
 ---
 
 ### 3.2 `LLML` — inference server
 
-**Crate:** `LLML/`  
-**Entry:** `LLML/src/main.rs`
+**Location:** `LLML/`  
+**Entry:** `LLML/main.py`
 
 ```
-cargo run          # reads ../ai-config.yaml, binds 0.0.0.0:3000
+python main.py [--config PATH] [--port PORT]
+# reads ../ai-config.yaml by default, binds 0.0.0.0:3000
 ```
 
 Startup sequence (see §5 for detail):
@@ -126,34 +144,46 @@ sequenceDiagram
         cli->>cli: break loop
     else normal message
         cli->>cli: push ChatMessage{role:"user"} to history
-        cli->>spinner: spawn background thread
-        cli->>Agent: agent.run(&history)
 
-        note over Agent: Step 1 — Reason
-        Agent->>Agent: replace_system(history, REASONING_SYSTEM)
-        Agent->>ApiClient: reason(&reasoning_history, Some(512))
-        ApiClient->>LLML: POST /v1/chat/completions {model:"reasoning"}
-        LLML-->>ApiClient: analysis string
-        ApiClient-->>Agent: Ok(analysis)
-
-        note over Agent: Step 2 — Decide
-        Agent->>Agent: build decision_messages\n[DECISION_SYSTEM, analysis as context, last user msg]
-        Agent->>ApiClient: decide(&decision_messages, Some(256))
-        ApiClient->>LLML: POST /v1/chat/completions {model:"decision"}
-        LLML-->>ApiClient: final answer string
-        ApiClient-->>Agent: Ok(answer)
-        Agent-->>cli: Ok(answer)
-
-        cli->>spinner: set running=false
-        spinner-->>cli: join (erase spinner line)
-
-        alt Ok(reply)
-            cli->>cli: push ChatMessage{role:"assistant"} to history
-            cli->>User: println!(reply)
-        else Err(e)
-            cli->>cli: pop pending user message (keep history consistent)
-            cli->>User: eprintln!(error)
+        alt LALA_SMART_ROUTER=1
+            cli->>Agent: classify_query(input, history)
+            Agent->>ApiClient: classify(query, context=last_2_turns)
+            ApiClient->>LLML: POST /v1/classify
+            LLML-->>ApiClient: {route, confidence}
+            ApiClient-->>Agent: RouteDecision
+            Agent-->>cli: RouteDecision
+        else heuristic (default)
+            cli->>cli: needs_reasoning(input) → RouteDecision
         end
+
+        alt RouteDecision::Direct
+            cli->>spinner: spawn
+            cli->>Agent: run_direct(&history)
+            Agent->>ApiClient: decide(decision_messages)
+            ApiClient->>LLML: POST /v1/chat/completions {model:"decision"}
+            LLML-->>ApiClient: answer
+            Agent-->>cli: answer
+            cli->>spinner: stop
+            cli->>User: print_section("Answer")
+        else RouteDecision::Reasoning
+            cli->>spinner: spawn
+            cli->>Agent: run_reasoning(&history)
+            Agent->>ApiClient: reason(reasoning_history)
+            ApiClient->>LLML: POST /v1/chat/completions {model:"reasoning"}
+            LLML-->>ApiClient: analysis
+            Agent-->>cli: analysis
+            cli->>User: print_section("Reasoning")
+
+            cli->>Agent: run_decision(&history, analysis)
+            Agent->>ApiClient: decide(decision_messages)
+            ApiClient->>LLML: POST /v1/chat/completions {model:"decision"}
+            LLML-->>ApiClient: final answer
+            Agent-->>cli: answer
+            cli->>spinner: stop
+            cli->>User: print_section("Answer")
+        end
+
+        cli->>cli: push ChatMessage{role:"assistant"} to history
     end
 ```
 
@@ -168,17 +198,18 @@ index 2   { role: "assistant", content: "..." }
 
 The entire vector is sent on every request so the model maintains multi-turn context. `/clear` truncates back to `len == 1`.
 
-### ApiClient — model role selection
+### ApiClient — model role selection and classification
 
-`ApiClient` in `lala/src/agent/model.rs` exposes three call paths:
+`ApiClient` in `lala/src/agent/model.rs` exposes four call paths:
 
-| Method | `"model"` field sent | Temperature used |
-|--------|---------------------|-----------------|
-| `chat(&msgs, max_tokens, None)` | omitted → server picks first registered | model config default |
-| `reason(&msgs, max_tokens)` | `"reasoning"` | 0.7 (from config) |
-| `decide(&msgs, max_tokens)` | `"decision"` | 0.3 (from config) |
+| Method | Endpoint | Notes |
+|--------|----------|-------|
+| `chat(&msgs, max_tokens, None)` | `POST /v1/chat/completions` | Server picks first registered model |
+| `reason(&msgs, max_tokens)` | `POST /v1/chat/completions` | `model: "reasoning"`, temp 0.7 |
+| `decide(&msgs, max_tokens)` | `POST /v1/chat/completions` | `model: "decision"`, temp 0.3 |
+| `classify(query, context)` | `POST /v1/classify` | Returns `RouteDecision::{Direct,Reasoning}` |
 
-`cli.rs` calls `Agent::run(&history)` which internally calls `reason()` then `decide()`. The analysis from the reasoning step is injected as hidden context for the decision step and is never shown to the user.
+`planner.rs` exposes `Agent::classify_query(input, history)` which wraps `client.classify()` with a local `needs_reasoning()` heuristic fallback. `cli.rs` calls the method when `smart_router=true`, otherwise resolves directly via `needs_reasoning()`.
 
 ---
 
@@ -307,46 +338,46 @@ user query
 pub struct Agent<'a> { client: &'a ApiClient }
 impl<'a> Agent<'a> {
     pub fn new(client: &'a ApiClient) -> Self
-    pub fn run(&self, history: &[ChatMessage]) -> anyhow::Result<String>
+    pub fn classify_query(&self, input: &str, history: &[ChatMessage]) -> RouteDecision
+    pub fn run_direct(&self, history: &[ChatMessage]) -> anyhow::Result<String>
+    pub fn run_reasoning(&self, history: &[ChatMessage]) -> anyhow::Result<String>
+    pub fn run_decision(&self, history: &[ChatMessage], analysis: &str) -> anyhow::Result<String>
     fn replace_system(history: &[ChatMessage], new_system: &str) -> Vec<ChatMessage>
 }
 ```
 
-`cli.rs` creates one `Agent` per session and calls `agent.run(&history)` on each turn. The reasoning output is internal — it is never pushed into the conversation history.
+`classify_query` calls `client.classify()` and falls back to `needs_reasoning()` on error. `cli.rs` branches on the returned `RouteDecision` to pick the direct or reasoning path.
+
+The reasoning output (`analysis`) is displayed to the user in the CLI under a `▷ Reasoning` section with yellow ANSI colouring. In the Telegram bot it is wrapped in a `<tg-spoiler>` so users can tap to reveal it.
 
 ---
 
 ## 7. Configuration — `ai-config.yaml`
 
-Parsed by `LLML/src/loalYaml/loadYaml.rs` into typed structs on startup.
+Parsed by `LLML/config.py` (`load_config()`) into a `list[ModelParams]` dataclass on startup. Each model defines a role key, GGUF path, and inference parameters.
 
 ```mermaid
 classDiagram
+    class ModelParams {
+        +str role
+        +str model_path
+        +float temperature
+        +int max_tokens
+        +int n_gpu_layers
+        +int n_threads
+        +int n_ctx
+        +int n_batch
+    }
     class AiConfig {
-        +u32 version
-        +ModelTypes model_types
-        +Vec~Model~ models
+        +int version
+        +list~ModelParams~ models
     }
-    class ModelTypes {
-        +Vec~String~ types
+    AiConfig --> ModelParams
+    note for ModelParams {
+        +str name
+        +str description
+        +str role
     }
-    class Model {
-        +String name
-        +String description
-        +String model_type
-        +String role
-        +Vec~Parameter~ parameters
-        +String model_path
-    }
-    class Parameter {
-        +String name
-        +String description
-        +String param_type
-        +serde_yaml::Value default
-    }
-    AiConfig --> ModelTypes
-    AiConfig --> Model
-    Model --> Parameter
 ```
 
 **Registered models (current `ai-config.yaml`):**
@@ -365,37 +396,29 @@ Both point to the same GGUF file (`mistral-7b-v0.1.Q4_K_M.gguf`). Different `Mod
 ```mermaid
 classDiagram
     class ModelRegistry {
-        -HashMap~String, ModelRunner~ models
+        -dict~str, ModelRunner~ _models
         +register(role, runner)
-        +get(role) Option~ModelRunner~
-        +roles() Vec~String~
-        +first() Option~str,ModelRunner~
+        +get(role) ModelRunner
+        +roles() list~str~
+        +first() tuple~str, ModelRunner~
     }
     class ModelRunner {
-        +LlamaModel model
-        -ModelParams params
-        +load(path, params) ModelRunner
-        +generate_from_prompt(prompt, max_tokens, temperature) String
-    }
-    class ModelParams {
-        +f32 temperature
-        +usize max_tokens
-        +u32 n_gpu_layers
-        +u32 n_threads
-        +u32 n_ctx
-        +u32 n_batch
+        -Llama _llm
+        -ModelParams _params
+        +generate(prompt, max_tokens, temperature) str
+        +stream(prompt, max_tokens, temperature) Iterator
     }
     ModelRegistry "1" --> "*" ModelRunner : contains
-    ModelRunner --> ModelParams : owns
+    ModelRunner --> ModelParams : configured by
 ```
 
-**Thread safety:** `ModelRunner` is `Send + Sync` (llama_cpp C++ objects are thread-safe). Each HTTP request runs inference in `tokio::task::spawn_blocking` — no async executor blocking. Each call creates a fresh `LlamaSession` so there is no context bleed between concurrent requests.
+**Thread safety:** `ModelRunner` wraps `llama-cpp-python`'s `Llama` object. Each HTTP request runs inference via `asyncio.to_thread` so the async event loop is never blocked. There is no shared mutable session state across concurrent requests.
 
 ---
 
 ## 9. Prompt Format
 
-`build_prompt()` in `api/mod.rs` converts the OpenAI `messages` array into the Mistral/Llama instruction format:
+`build_prompt()` in `LLML/api/routes.py` converts the OpenAI `messages` array into the Mistral/Llama instruction format:
 
 ```
 <s>[INST] {system_prompt}
@@ -504,6 +527,48 @@ curl -s http://localhost:3000/v1/chat/completions \
   }' | jq '.choices[0].message.content'
 ```
 
+### POST `/v1/classify`
+
+Classifies a query as requiring reasoning or a direct answer. Used by `lala` CLI (when `LALA_SMART_ROUTER=1`) and by the Telegram bot (when `SMART_ROUTER=1`).
+
+**Request:**
+```json
+{
+  "query": "what's the weather like today?",
+  "context": [
+    { "role": "user",      "content": "hi" },
+    { "role": "assistant", "content": "Hello! How can I help?" }
+  ],
+  "model": "reasoning"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `query` | yes | The raw user message to classify |
+| `context` | no | Last 1–2 conversation turns for context |
+| `model` | no | Which model to use for LLM classification; defaults to `"reasoning"` |
+
+**Response:**
+```json
+{ "route": "direct", "confidence": "heuristic" }
+```
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| `route` | `"direct"` \| `"reasoning"` | Destination path |
+| `confidence` | `"heuristic"` \| `"llm"` | Whether LLM or fast-path heuristic decided |
+
+The heuristic fast-path fires first (social/greeting patterns → `"direct"` immediately, no LLM call). On error, the endpoint returns 200 with a heuristic fallback — never 5xx.
+
+#### curl example
+
+```sh
+curl -s http://localhost:3000/v1/classify \
+  -H "Content-Type: application/json" \
+  -d '{"query": "explain transformers in ML"}' | jq .
+```
+
 ### GET `/v1/models`
 
 Returns all registered roles. Example:
@@ -529,13 +594,14 @@ curl -s http://localhost:3000/v1/models | jq .
 
 The `ApiClient` struct is the sole boundary between `lala` and `LLML`. It uses `reqwest::blocking::Client` (no timeout — CPU inference can be slow).
 
-| Method | Description |
-|--------|-------------|
-| `chat(messages, max_tokens, model_role)` | Core — sends full history, returns reply string |
-| `reason(messages, max_tokens)` | Shortcut — selects `ModelRole::Reasoning` |
-| `decide(messages, max_tokens)` | Shortcut — selects `ModelRole::Decision` |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `chat(messages, max_tokens, model_role)` | `/v1/chat/completions` | Core — sends full history, returns reply string |
+| `reason(messages, max_tokens)` | `/v1/chat/completions` | Shortcut — selects `ModelRole::Reasoning` |
+| `decide(messages, max_tokens)` | `/v1/chat/completions` | Shortcut — selects `ModelRole::Decision` |
+| `classify(query, context)` | `/v1/classify` | Returns `RouteDecision::{Direct,Reasoning}` |
 
-`ModelRole::as_str()` maps enum variants to the string keys expected by the LLML server (`"reasoning"`, `"decision"`).
+`RouteDecision::from_str()` maps the `"route"` string from the server response to the enum, defaulting to `Reasoning` on any unrecognised value (fail-closed).
 
 ---
 
@@ -606,8 +672,10 @@ flowchart TD
 | Multi-model routing (server) | `ModelRegistry` + role-based routing ✅ | Done |
 | Per-request temperature (server) | Wired through `generate_from_prompt` ✅ | Done |
 | Role selection (client) | `reason()` / `decide()` used by `Agent` ✅ | Done |
-| Two-step agent loop | `Agent::run()` — reason → decide ✅ | Done |
-| Prompt building | `api/mod.rs build_prompt()` in LLML | Agent Layer (Executor/Reasoner) |
+| Two-step agent loop | `Agent::run_reasoning()` + `run_decision()` ✅ | Done |
+| Query routing | `POST /v1/classify` + `RouteDecision` + `LALA_SMART_ROUTER` ✅ | Done |
+| Telegram bot | classify → direct \| reason→decide + spoiler formatting ✅ | Done |
+| Prompt building | `build_prompt()` in `LLML/api/routes.py` | Agent Layer (Executor/Reasoner) |
 | Retrieval | None | RAG Layer `retrieve(query, k)` |
 | Document ingestion | None | RAG Layer `store(text)` |
 | DB access | `db/connection.rs` declared but unused | RAG Layer only via `PgPool` |
@@ -625,13 +693,19 @@ flowchart TD
 | `anyhow` | Error propagation |
 | `sqlx` | PostgreSQL client (declared, not yet active in loop) |
 
-### LLML
-| Crate | Purpose |
-|-------|---------|
-| `llama_cpp` | Local GGUF model loading and token generation |
-| `axum` | Async HTTP server and router |
-| `tokio` | Async runtime |
-| `serde` / `serde_yaml` / `serde_json` | YAML config + JSON API serialization |
-| `tracing` / `tracing-subscriber` | Structured logging (level via `RUST_LOG`) |
-| `anyhow` | Error propagation |
+### LLML (Python)
+| Package | Purpose |
+|---------|--------|
+| `llama-cpp-python` | Local GGUF model loading and token generation |
+| `fastapi` | Async HTTP server and router |
+| `uvicorn` | ASGI server |
+| `pydantic` | Request/response validation and serialization |
+| `pyyaml` | `ai-config.yaml` parsing |
 | `uuid` | Response IDs |
+
+### Telegram bot (Python)
+| Package | Purpose |
+|---------|--------|
+| `python-telegram-bot` | Telegram API client + async long-polling |
+| `requests` | Blocking HTTP client for LLML API |
+| `python-dotenv` | Load `.env` files into environment |

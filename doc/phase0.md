@@ -1,7 +1,8 @@
-# Phase 0 — Initial Agent Architecture Proposal
+# Phase 0 — Initial Agent Architecture
 
-> **Status:** Proposed  
-> **Replaces:** Current flat CLI→LLM loop (`cli.rs` + `agent/model.rs`)  
+> **Status:** In Progress  
+> **Branch:** `master`  
+> **Replaces:** Flat CLI→LLM loop (`cli.rs` + `agent/model.rs`)  
 > **Goal:** Establish the foundational 5-layer architecture all future phases will build on.
 
 ---
@@ -130,14 +131,18 @@ Connection pool (`PgPool`) is initialized once at startup and injected into the 
 ## 4. Current State vs. Phase 0 Target
 
 | Concern | Current (`master`) | Phase 0 target |
-|---------|-------------------|----------------|
-| Entry point | `main.rs` → `cli::run()` | `main.rs` → Interface Layer → Agent Layer |
-| Prompt building | `cli.rs::build_prompt()` | Agent Layer (Executor/Reasoner) |
-| LLM call | `cli.rs` (inline) | Model Layer (`generate()`) |
+|---------|-------------------|-----------------|
+| Entry point | `main.rs` → `cli::run(smart_router)` | `main.rs` → Interface Layer → Agent Layer |
+| Prompt building | `LLML/api/routes.py build_prompt()` | Agent Layer (Executor/Reasoner) |
+| LLM call | `ApiClient` → HTTP → LLML | Model Layer (`generate()`) |
+| Query routing | `POST /v1/classify` + `LALA_SMART_ROUTER` env ✅ | Done |
+| Two-step agent | `run_reasoning()` → `run_decision()` ✅ | Done |
+| Direct fast path | `run_direct()` ✅ | Done |
 | Retrieval | None | RAG Layer (`retrieve()`) |
 | Document ingestion | None | RAG Layer (`store()`) |
 | DB access | `db/connection.rs` (unused in loop) | RAG Layer only, via connection pool |
-| Session/state | Stateful `SessionWrapper` in CLI | Owned by Agent Layer |
+| Session/state | In-memory `Vec<ChatMessage>` in CLI | Owned by Agent Layer |
+| Telegram client | Classify → route → spoiler-formatted reply ✅ | Done |
 
 ---
 
@@ -221,13 +226,16 @@ The following features are **out of scope** for Phase 0. They will be addressed 
 
 Phase 0 is complete when:
 
+- [x] The query router (`POST /v1/classify` + `RouteDecision`) directs simple queries to the decision model directly, skipping the reasoning step.
+- [x] `Agent::classify_query()` is the single routing entry point, with a local heuristic fallback.
+- [x] Telegram bot integrates the classifier and displays reasoning to users via `<tg-spoiler>`.
 - [ ] A user can type a question in the CLI and receive a response grounded in retrieved document chunks.
-- [ ] The five layers are implemented as separate Rust modules with no cross-layer imports that violate the dependency rules in §2.
+- [ ] The five layers are implemented as separate modules with no cross-layer imports that violate the dependency rules in §2.
 - [ ] `Agent::run()` is the single entry point from the Interface Layer.
-- [ ] The RAG Layer can store at least one document (via a `/ingest` CLI command or startup fixture) and retrieve relevant chunks for a query.
+- [ ] The RAG Layer can store at least one document and retrieve relevant chunks for a query.
 - [ ] The Model Layer exposes only `generate(prompt: &str) -> Result<String>` to other layers.
 - [ ] The DB connection pool is initialized once and injected — not re-opened per request.
-- [ ] All existing `cargo build` and `cargo check` passes with zero warnings.
+- [ ] All existing `cargo build` and `cargo check` pass with zero warnings.
 
 ---
 

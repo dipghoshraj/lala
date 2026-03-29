@@ -23,7 +23,7 @@
 ## Target Layout
 
 ```
-LLML-py/
+LLML/
 ├── requirements.txt          # fastapi, uvicorn, llama-cpp-python, pyyaml
 ├── main.py                   # Entry: argparse → load config → build registry → uvicorn
 ├── config.py                 # Dataclasses mirroring ai-config.yaml; params_from_config()
@@ -33,7 +33,8 @@ LLML-py/
 │   └── registry.py           # ModelRegistry: role (str) → ModelRunner
 └── api/
     ├── __init__.py
-    └── routes.py             # FastAPI router, Pydantic models, build_prompt(), slide_messages()
+    ├── routes.py             # FastAPI router, Pydantic models, build_prompt(), slide_messages()
+    └── classifier.py         # Heuristic patterns + CLASSIFIER_SYSTEM prompt + heuristic_route()
 ```
 
 ---
@@ -167,6 +168,7 @@ Context window management — port of `LLML/src/api/mod.rs:slide_messages()`:
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | Inference endpoint |
 | `GET`  | `/v1/models` | Lists registered model roles |
+| `POST` | `/v1/classify` | Query router — classify a query as `"direct"` or `"reasoning"` |
 
 **POST /v1/chat/completions** behaviour:
 
@@ -182,6 +184,44 @@ data: {"id":"...","object":"chat.completion.chunk","choices":[{"index":0,"delta"
 Final frame:
 ```
 data: [DONE]\n\n
+```
+
+---
+
+### `api/classifier.py`
+
+Single source of truth for all query-classification logic. Imported by `routes.py` — not a standalone server module.
+
+```python
+DIRECT_PATTERNS: tuple[str, ...]   # Social/greeting strings → always "direct" with no LLM call
+REASONING_TRIGGERS: tuple[str, ...] # Keywords that signal multi-step work needed
+CLASSIFIER_SYSTEM: str              # LLM system prompt: "Reply with exactly one word — REASON or DIRECT"
+
+def heuristic_route(query: str) -> str:
+    """Priority classifier. Returns 'direct' or 'reasoning' without any LLM call."""
+```
+
+Priority rules inside `heuristic_route` (in order):
+1. Empty / whitespace-only query → `"direct"`
+2. Social/greeting pattern match (`DIRECT_PATTERNS`) → `"direct"`
+3. Reasoning keyword match (`REASONING_TRIGGERS`) → `"reasoning"`
+4. Short query (≤ 4 words) → `"direct"`
+5. Default fallback → `"reasoning"`
+
+**POST `/v1/classify` handler** (in `routes.py`) uses `classifier.py` as follows:
+1. Fast-path: if `heuristic_route(query)` matches a social pattern → return `{route: "direct", confidence: "heuristic"}` immediately.
+2. LLM path: call reasoning model with `CLASSIFIER_SYSTEM` prompt, `max_tokens=5, temperature=0.0` → parse `"REASON"` in response → `"reasoning"`, else `"direct"`.
+3. Error/fallback: any exception → return `heuristic_route(query)` with `confidence: "heuristic"`. Always 200.
+
+```python
+class ClassifyRequest(BaseModel):
+    query: str
+    context: list[ChatMessage] = []
+    model: str | None = None   # defaults to "reasoning"
+
+class ClassifyResponse(BaseModel):
+    route: str        # "direct" | "reasoning"
+    confidence: str   # "llm" | "heuristic"
 ```
 
 ---
@@ -221,7 +261,7 @@ The only addition is the optional `"stream": true` field, which is ignored by ex
 
 ```sh
 # Install dependencies
-cd LLML-py
+cd LLML
 pip install -r requirements.txt
 
 # Start server (reads ../ai-config.yaml, serves on :3000)
@@ -281,6 +321,17 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hello"}]}'
 # → {"choices":[{"message":{"content":"..."}}],...}
+
+# 4. Classify endpoint
+curl -X POST http://localhost:3000/v1/classify \
+  -H "Content-Type: application/json" \
+  -d '{"query": "explain transformers in ML"}'
+# → {"route":"reasoning","confidence":"llm"}
+
+curl -X POST http://localhost:3000/v1/classify \
+  -H "Content-Type: application/json" \
+  -d '{"query": "hi"}'
+# → {"route":"direct","confidence":"heuristic"}
 
 # 5. Streaming inference
 curl -X POST http://localhost:3000/v1/chat/completions \
