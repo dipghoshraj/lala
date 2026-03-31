@@ -2,7 +2,7 @@
 
 > **Status:** Planned
 > **Depends on:** [phase0.md](phase0.md) — layered architecture scaffold
-> **Goal:** Implement the RAG Layer (`lala/src/rag/`) using SQLite FTS5 for keyword (BM25) retrieval. No neural embeddings. Store + Retrieve only — agent wiring is Phase 1.
+> **Goal:** Implement the RAG Layer as a **standalone Rust crate** (`rag/` at repo root) using SQLite FTS5 for keyword (BM25) retrieval. No neural embeddings. Store + Retrieve only — agent wiring is Phase 1. This is an independent library crate that any consumer (`lala`, future HTTP API, background indexer) can import via `use rag::RagStore`. The focus is on building a robust, self-contained retrieval crate that can be easily wired into the agent in Phase 1.
 
 ---
 
@@ -50,16 +50,27 @@ Both objects are created via `CREATE ... IF NOT EXISTS` inside `RagStore::open()
 
 ---
 
-## 3. Module Structure
+## 3. Crate Structure
+
+The RAG layer lives in its own crate at the repository root, sibling to `lala/` and `LLML/`:
 
 ```
-lala/src/
-  rag/
-    mod.rs        ← RagStore, Chunk, store(), retrieve(), unit tests
-    chunker.rs    ← chunk(text, chunk_size, overlap) -> Vec<String>
+rag/
+  Cargo.toml      ← [package] name = "rag"; deps: rusqlite (bundled), uuid, anyhow
+  src/
+    lib.rs         ← RagStore, Chunk, store(), retrieve(), re-exports chunker::chunk
+    chunker.rs     ← chunk(text, chunk_size, overlap) -> Vec<String>
 ```
 
-`mod.rs` re-exports the `chunk` function from `chunker` to keep external callers to a single import path.
+A Cargo workspace file at the repo root ties the crates together:
+
+```toml
+# lala.ai/Cargo.toml
+[workspace]
+members = ["lala", "rag"]
+```
+
+`lib.rs` re-exports the `chunk` function from `chunker` to keep external callers to a single import path.
 
 ---
 
@@ -129,11 +140,13 @@ FTS5's `bm25()` returns a **negative** float — more negative means a better ma
 
 | File | Change |
 |------|--------|
-| `lala/Cargo.toml` | Add `rusqlite = { version = "0.32", features = ["bundled"] }` and `uuid = { version = "1", features = ["v4"] }` |
-| `lala/src/main.rs` | Add `mod rag;`, resolve `LALA_DB_PATH` env var, init `RagStore`, thread it to `cli::run()` |
+| `Cargo.toml` (repo root) | **New** — Cargo workspace: `members = ["lala", "rag"]` |
+| `rag/Cargo.toml` | **New** — `[package] name = "rag"`; deps: `rusqlite` (bundled), `uuid` (v4), `anyhow` |
+| `rag/src/lib.rs` | **New** — `RagStore`, `Chunk`, `store()`, `retrieve()`, unit tests |
+| `rag/src/chunker.rs` | **New** — `chunk()` pure function |
+| `lala/Cargo.toml` | Add `rag = { path = "../rag" }` dependency; remove `sqlx` (unused) |
+| `lala/src/main.rs` | Add `use rag::RagStore;`, resolve `LALA_DB_PATH` env var, init `RagStore`, thread it to `cli::run()` |
 | `lala/src/cli.rs` | Accept `RagStore` (owned or `Arc`), add `/ingest-file <path>` and `/search <query>` commands |
-| `lala/src/rag/mod.rs` | **New** — `RagStore`, `Chunk`, `store()`, `retrieve()`, unit tests |
-| `lala/src/rag/chunker.rs` | **New** — `chunk()` pure function |
 
 ---
 
@@ -190,6 +203,8 @@ When the agent loop is ready to consume retrieved context, the integration point
 
 ```rust
 // Phase 1 addition inside Agent::run_reasoning() or a new run_with_rag()
+use rag::{RagStore, Chunk};
+
 ChatMessage {
     role: "system".to_string(),
     content: format!(
@@ -199,14 +214,15 @@ ChatMessage {
 }
 ```
 
-No structural changes to `planner.rs` are needed for this — it is a data injection, not an architectural change.
+No structural changes to `planner.rs` are needed for this — it is a data injection, not an architectural change. The `rag` crate is already a workspace dependency of `lala`.
 
 ---
 
 ## 10. Acceptance Criteria
 
+- [ ] `cargo check -p rag` — zero errors, zero warnings
 - [ ] `cargo check -p lala` — zero errors, zero warnings
-- [ ] `cargo test -p lala` — unit tests:
+- [ ] `cargo test -p rag` — unit tests:
   - Store one document, retrieve with a term present in it, assert ≥1 chunk with a negative BM25 score
   - Store a document, attempt to store with same `source` again — assert duplicate is rejected
   - Chunker: text shorter than `chunk_size` → returns exactly 1 chunk
@@ -233,13 +249,13 @@ No structural changes to `planner.rs` are needed for this — it is a data injec
 
 ---
 
-## 12. Module Independence
+## 12. Crate Independence
 
-The RAG module (`lala/src/rag/`) is designed as a **self-contained, independent module**. It has no dependencies on the agent, CLI, or model layers. Other modules consume it through the public `RagStore` API:
+The RAG layer is a **standalone Rust crate** (`rag/` at repo root) with zero dependencies on `lala`, the agent, CLI, or model layers. Any application in the workspace can depend on it:
 
 ```rust
-// Any module can use the RAG layer through this interface:
-use crate::rag::RagStore;
+// Any crate in the workspace can use the RAG layer:
+use rag::RagStore;
 
 let store = RagStore::open("./lala.db")?;
 let count = store.store("title", "source", "text content")?;
@@ -247,8 +263,9 @@ let chunks = store.retrieve("search query", 5)?;
 ```
 
 This means:
+- `lala` (the agentic layer) adds `rag = { path = "../rag" }` to its `Cargo.toml` and calls `use rag::RagStore;`
 - The agent layer (Phase 1) can call `store.retrieve()` without knowing about SQLite or FTS5 internals
-- Future modules (HTTP API, background indexer) can call `store.store()` and `store.retrieve()` independently
+- Future applications (HTTP API, background indexer, telegram Rust port) can independently depend on the `rag` crate
 - The retrieval backend can be swapped (e.g. to pgvector) without changing any consumer code, as long as the `RagStore` method signatures are preserved
 
 **Phase 1 consideration:** If multiple retrieval backends are needed (e.g. FTS5 + vector), introduce a `RagRetriever` trait at that point. For Phase 0, the concrete `RagStore` struct is sufficient.

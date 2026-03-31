@@ -8,11 +8,12 @@
 
 ```
 lala.ai/
+├── Cargo.toml              # Workspace root: members = ["lala", "rag"]
 ├── ai-config.yaml          # Shared model configuration (read by LLML at startup)
 ├── LLML.Dockerfile         # LLML inference server Docker image (CPU; GPU-ready)
 ├── psql.Dockerfile         # PostgreSQL 18 + pgvector image
-├── lala/                   # Rust CLI client
-│   ├── Cargo.toml
+├── lala/                   # Rust CLI client (binary crate)
+│   ├── Cargo.toml          # deps: reqwest, rustyline, serde, anyhow, rag (path)
 │   └── src/
 │       ├── main.rs         # Entry point — resolves API URL + LALA_SMART_ROUTER flag
 │       ├── cli.rs          # REPL loop, spinner, conversation history
@@ -20,6 +21,11 @@ lala.ai/
 │           ├── mod.rs
 │           ├── model.rs    # ApiClient — HTTP wrapper (chat, classify); RouteDecision enum
 │           └── planner.rs  # Agent — query router, reasoning→decision pipeline
+├── rag/                    # Standalone RAG library crate
+│   ├── Cargo.toml          # deps: rusqlite (bundled), uuid (v4), anyhow
+│   └── src/
+│       ├── lib.rs          # RagStore, Chunk, store(), retrieve()
+│       └── chunker.rs      # chunk(text, size, overlap) → Vec<String>
 ├── LLML/                   # Python inference server (FastAPI + llama-cpp-python)
 │   ├── main.py             # Entry point — loads config, starts uvicorn on :3000
 │   ├── config.py           # Deserializes ai-config.yaml → ModelParams
@@ -78,8 +84,10 @@ graph TD
     LLML --> Classifier
 
     DB -.->|"planned — RAG + memory"| Lala
+    RAGCrate["rag/\nRust library crate\nSQLite FTS5"] -.->|"use rag::RagStore"| Lala
 
     style DB stroke-dasharray: 5 5
+    style RAGCrate stroke-dasharray: 5 5
 ```
 
 Solid lines = live today. Dashed = provisioned, not yet in the request loop.
@@ -664,7 +672,7 @@ flowchart TD
     subgraph target ["Target — Phase 0 (doc/phase0.md)"]
         U2[User] --> IF[CLI\ncli.rs]
         IF --> AG[Agent Layer\nPlanner / Reasoner]
-        AG --> RAG[RAG Layer\nretrieve / store / chunk]
+        AG --> RAG["rag/ crate\nRagStore: retrieve / store / chunk"]
         AG --> LLM[Model Layer\nApiClient → LLML]
         RAG --> DB2[(SQLite + FTS5)]
     end
@@ -682,9 +690,10 @@ flowchart TD
 | Query routing | `POST /v1/classify` + `RouteDecision` + `LALA_SMART_ROUTER` ✅ | Done |
 | Telegram bot | classify → direct \| reason→decide + spoiler formatting ✅ | Done |
 | Prompt building | `build_prompt()` in `LLML/api/routes.py` | Stays in LLML — `lala` sends structured messages |
-| Retrieval | None | RAG Layer `retrieve(query, k)` via SQLite FTS5 |
-| Document ingestion | None | RAG Layer `store(text)` via SQLite FTS5 |
-| DB access | None | RAG Layer via `rusqlite` (`RagStore`) |
+| RAG crate | None | Standalone `rag/` crate: `RagStore` with `store()` + `retrieve()` via SQLite FTS5 |
+| Retrieval | None | RAG Layer `retrieve(query, k)` via `rag` crate |
+| Document ingestion | None | RAG Layer `store(text)` via `rag` crate |
+| DB access | None | RAG Layer via `rusqlite` (`RagStore`) inside `rag` crate |
 
 ---
 
@@ -697,8 +706,14 @@ flowchart TD
 | `reqwest` (blocking + json) | HTTP client for LLML API |
 | `serde` / `serde_json` | JSON serialization of ChatMessage arrays |
 | `anyhow` | Error propagation |
-| `rusqlite` (bundled) | SQLite + FTS5 for RAG storage (Phase 0) |
+| `rag` (path dep) | Standalone RAG crate — SQLite FTS5 store + retrieve |
+
+### rag
+| Crate | Purpose |
+|-------|---------|
+| `rusqlite` (bundled) | SQLite + FTS5 for BM25 keyword retrieval |
 | `uuid` | Document/chunk ID generation |
+| `anyhow` | Error propagation |
 
 ### LLML (Python)
 | Package | Purpose |

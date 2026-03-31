@@ -83,6 +83,8 @@ Sub-components introduced in Phase 0 (stubs acceptable at this stage):
 
 **Responsibility:** All document-related operations: ingestion, chunking, and keyword retrieval.
 
+The RAG Layer is a **standalone Rust crate** (`rag/` at repo root), independent of `lala`. It has its own `Cargo.toml` and can be consumed by any application in the workspace.
+
 Operations in Phase 0 scope:
 
 | Operation | Description |
@@ -94,7 +96,7 @@ Chunking strategy: fixed-size **character** windows (512 chars, 64-char overlap)
 Retrieval engine: SQLite FTS5 with native `bm25()` ranking — no neural embeddings in Phase 0.  
 DB crate: `rusqlite` with `bundled` feature (compiles SQLite + FTS5 in).
 
-The RAG Layer **only reads/writes the DB**. It does not call the LLM. It is a self-contained module with no dependencies on other layers — see [phase0-rag.md §12](phase0-rag.md) for the module independence principle.
+The RAG Layer **only reads/writes the DB**. It does not call the LLM. It is a standalone crate with no dependencies on other layers — see [phase0-rag.md §12](phase0-rag.md) for the crate independence principle.
 
 ---
 
@@ -152,18 +154,31 @@ See [phase0-rag.md §2](phase0-rag.md) for the full schema definition.
 
 ## 5. Module Structure (Phase 0)
 
+The project uses a **Cargo workspace** at the repo root to manage multiple crates:
+
+```toml
+# lala.ai/Cargo.toml (workspace root)
+[workspace]
+members = ["lala", "rag"]
 ```
-lala/src/
-  main.rs                 # Startup: resolve API URL, init RagStore, start CLI
-  cli.rs                  # Readline loop, spinner, conversation history, /ingest-file, /search
+
+```
+rag/                          # Standalone RAG crate (library)
+  Cargo.toml                  # deps: rusqlite (bundled), uuid (v4), anyhow
+  src/
+    lib.rs                    # RagStore, Chunk, store(), retrieve(), unit tests
+    chunker.rs                # chunk(text, chunk_size, overlap) → Vec<String>
+
+lala/src/                     # CLI + Agent crate (binary)
+  main.rs                     # Startup: resolve API URL, init RagStore, start CLI
+  cli.rs                      # Readline loop, spinner, conversation history, /ingest-file, /search
   agent/
     mod.rs
-    model.rs              # ApiClient — HTTP wrapper (chat, reason, decide, classify)
-    planner.rs            # Agent — query router, reasoning→decision pipeline
-  rag/
-    mod.rs                # RagStore, Chunk, store(), retrieve(), unit tests
-    chunker.rs            # chunk(text, chunk_size, overlap) → Vec<String>
+    model.rs                  # ApiClient — HTTP wrapper (chat, reason, decide, classify)
+    planner.rs                # Agent — query router, reasoning→decision pipeline
 ```
+
+`lala/Cargo.toml` depends on the RAG crate via a path dependency: `rag = { path = "../rag" }`.
 
 **Notes:**
 - No `model/wrapper.rs` — the Model Layer is the existing `ApiClient` in `agent/model.rs`
@@ -228,8 +243,8 @@ Phase 0 is complete when:
 - [x] The query router (`POST /v1/classify` + `RouteDecision`) directs simple queries to the decision model directly, skipping the reasoning step.
 - [x] `Agent::classify_query()` is the single routing entry point, with a local heuristic fallback.
 - [x] Telegram bot integrates the classifier and displays reasoning to users via `<tg-spoiler>`.
-- [ ] The RAG Layer (`lala/src/rag/`) can store at least one document and retrieve relevant chunks via `/ingest-file` and `/search` CLI commands.
-- [ ] RAG module is self-contained — no imports from agent, cli, or model layers.
+- [ ] The RAG crate (`rag/`) can store at least one document and retrieve relevant chunks via `/ingest-file` and `/search` CLI commands in `lala`.
+- [ ] RAG crate is self-contained — no imports from agent, cli, or model layers. Tested via `cargo test -p rag`.
 - [ ] The Model Layer (existing `ApiClient`) continues to work unchanged for the two-step agent pipeline.
 - [ ] SQLite DB file is created at startup and persists between sessions.
 - [ ] All existing `cargo build` and `cargo check` pass with zero warnings.

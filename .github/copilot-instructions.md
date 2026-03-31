@@ -7,8 +7,9 @@ Rust-based local **Agentic RAG** system. Three components communicate over HTTP:
 - **`lala`** — interactive CLI client (Rust: terminal REPL, conversation history, spinner)
 - **`LLML`** — local LLM inference server (Python/FastAPI: loads GGUF models, serves OpenAI-compatible API)
 - **`telegram`** — Telegram bot client (Python: classify → route → spoiler-formatted reply)
+- **`rag`** — standalone RAG library crate (Rust: SQLite FTS5, BM25 keyword retrieval)
 
-SQLite + FTS5 is the Phase 0 RAG storage engine (keyword BM25 retrieval). PostgreSQL + pgvector is provisioned for future vector search phases.
+The project uses a **Cargo workspace** (`lala.ai/Cargo.toml`) with members `lala` and `rag`. SQLite + FTS5 is the Phase 0 RAG storage engine (keyword BM25 retrieval). PostgreSQL + pgvector is provisioned for future vector search phases.
 
 ---
 
@@ -35,6 +36,13 @@ LLML/api/classifier.py    Heuristic + LLM-based query classifier
  │ llama-cpp-python (C FFI)
  ▼
 *.gguf model file (local filesystem, path from ai-config.yaml)
+
+rag/src/lib.rs            RagStore — SQLite FTS5 store() + retrieve(), Chunk struct
+rag/src/chunker.rs        chunk(text, size, overlap) → Vec<String>
+ │ rusqlite (C FFI)
+ ▼
+lala.db (SQLite file, local filesystem)
+```
 ```
 
 ---
@@ -153,10 +161,11 @@ Generation stops early if `[/INST]` appears in output tokens (prevents prompt le
 - **Thread safety (LLML)**: `ModelRunner` wraps `llama-cpp-python`'s `Llama` object. Each HTTP request runs inference via `asyncio.to_thread()` so the async event loop is never blocked.
 - **Blocking inference**: always run model inference inside `asyncio.to_thread()` in LLML — never block the FastAPI event loop directly.
 - **Embeddings** (planned, Phase 1+): `Vec<f32>`, pgvector columns, model `"bge-small"`, cosine distance `<=>` operator.
-- **RAG storage (Phase 0)**: SQLite + FTS5 via `rusqlite` with `bundled` feature. Keyword BM25 retrieval only — no neural embeddings.
-- **Config is LLML’s concern**: `lala` never reads `ai-config.yaml`; it selects models by role string via the API.
+- **RAG storage (Phase 0)**: SQLite + FTS5 via `rusqlite` with `bundled` feature in the standalone `rag` crate. Keyword BM25 retrieval only — no neural embeddings.
+- **Config is LLML's concern**: `lala` never reads `ai-config.yaml`; it selects models by role string via the API.
 - **Role strings**: `"reasoning"` and `"decision"` — must match keys registered in `ModelRegistry`; defined under `role:` in `ai-config.yaml`.
-- **RAG module independence**: `lala/src/rag/` is self-contained with no dependencies on agent, CLI, or model layers. Other modules consume it through the `RagStore` public API.
+- **RAG crate independence**: `rag/` is a standalone library crate with zero dependencies on `lala`, agent, CLI, or model layers. Consumers depend on it via `rag = { path = "../rag" }` and call the `RagStore` public API.
+- **Cargo workspace**: The repo root `Cargo.toml` defines `members = ["lala", "rag"]`. Both crates share a workspace lockfile.
 
 ---
 
@@ -171,13 +180,16 @@ Generation stops early if `[/INST]` appears in output tokens (prevents prompt le
 
 Target module layout (Phase 0) — see [doc/phase0.md](../doc/phase0.md):
 ```
-lala/src/
-  main.rs                 # Startup: resolve API URL, init RagStore, start CLI
-  cli.rs                  # Readline loop, /ingest-file, /search commands
-  agent/                  # Planner, Reasoner (existing)
-  rag/                    # RagStore: store(), retrieve() via SQLite FTS5
-    mod.rs                # RagStore, Chunk, store(), retrieve()
-    chunker.rs            # chunk(text, size, overlap) → Vec<String>
+rag/                        # Standalone RAG library crate
+  Cargo.toml                # deps: rusqlite (bundled), uuid (v4), anyhow
+  src/
+    lib.rs                  # RagStore, Chunk, store(), retrieve()
+    chunker.rs              # chunk(text, size, overlap) → Vec<String>
+
+lala/src/                   # CLI + Agent binary crate
+  main.rs                   # Startup: resolve API URL, init RagStore, start CLI
+  cli.rs                    # Readline loop, /ingest-file, /search commands
+  agent/                    # Planner, Reasoner (existing)
 ```
 
 ---
@@ -199,8 +211,14 @@ lala/src/
 | `reqwest` (blocking + json) | HTTP client for LLML API |
 | `serde` / `serde_json` | ChatMessage serialization |
 | `anyhow` | Error propagation |
-| `rusqlite` (bundled) | SQLite + FTS5 for RAG storage (Phase 0) |
+| `rag` (path dep) | Standalone RAG crate — SQLite FTS5 store + retrieve |
+
+### rag
+| Crate | Purpose |
+|-------|---------|
+| `rusqlite` (bundled) | SQLite + FTS5 for BM25 keyword retrieval |
 | `uuid` | Document/chunk ID generation |
+| `anyhow` | Error propagation |
 
 ### LLML
 | Package | Purpose |

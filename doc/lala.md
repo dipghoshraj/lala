@@ -195,8 +195,7 @@ This can be edited in `cli.rs` under `const SYSTEM_PROMPT`.
 | `rustyline` | Readline-style input with history and arrow-key navigation |
 | `serde` / `serde_json` | HTTP request/response serialization |
 | `anyhow`    | Error propagation |
-| `rusqlite` (bundled) | SQLite + FTS5 for RAG storage (Phase 0) |
-| `uuid`      | Document/chunk ID generation |
+| `rag` (path dep) | Standalone RAG crate — SQLite FTS5 store + retrieve |
 
 ---
 
