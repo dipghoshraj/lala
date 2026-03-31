@@ -1,4 +1,5 @@
 use crate::agent::model::{ApiClient, ChatMessage, RouteDecision};
+use rag::RagStore;
 
 // ── Query classifier ──────────────────────────────────────────────────────────
 
@@ -90,23 +91,76 @@ const DECISION_SYSTEM: &str =
 /// `run` is a convenience wrapper that executes both steps in sequence.
 pub struct Agent<'a> {
     client: &'a ApiClient,
+    store: &'a RagStore,
 }
 
 impl<'a> Agent<'a> {
-    pub fn new(client: &'a ApiClient) -> Self {
-        Self { client }
+    pub fn new(client: &'a ApiClient, store: &'a RagStore) -> Self {
+        Self { client, store }
+    }
+
+    /// Retrieve relevant chunks from the RAG store for the given query.
+    /// Returns `Some(context_string)` if chunks were found, `None` otherwise.
+    pub fn retrieve_context(&self, query: &str) -> anyhow::Result<Option<String>> {
+        // Strip characters that are special in FTS5 query syntax.
+        let sanitized: String = query
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+            .collect();
+        let sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+        if sanitized.is_empty() {
+            return Ok(None);
+        }
+        let chunks = self.store.retrieve(&sanitized, 5)?;
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+        let context = chunks
+            .iter()
+            .map(|c| c.chunk_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        Ok(Some(context))
     }
 
     /// Step 1 — send the full history to the reasoning model.
     /// Returns the internal analysis string; does not modify history.
-    pub fn run_reasoning(&self, history: &[ChatMessage]) -> anyhow::Result<String> {
-        let reasoning_history = Self::replace_system(history, REASONING_SYSTEM);
+    /// When `context` is provided, it is appended to the reasoning system prompt.
+    pub fn run_reasoning(
+        &self,
+        history: &[ChatMessage],
+        context: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let system = match context {
+            Some(ctx) => format!(
+                "{}\n\n--- Retrieved Context ---\n{}\n--- End Context ---\n\n\
+                 Use the retrieved context above to inform your analysis when relevant.",
+                REASONING_SYSTEM, ctx
+            ),
+            None => REASONING_SYSTEM.to_string(),
+        };
+        let reasoning_history = Self::replace_system(history, &system);
         self.client.reason(&reasoning_history, Some(512))
     }
 
     /// Step 2 — send a compact context (system + analysis + last user message)
     /// to the decision model. Returns the final answer string.
-    pub fn run_decision(&self, history: &[ChatMessage], analysis: &str) -> anyhow::Result<String> {
+    /// When `context` is provided, it is appended to the decision system prompt.
+    pub fn run_decision(
+        &self,
+        history: &[ChatMessage],
+        analysis: &str,
+        context: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let system = match context {
+            Some(ctx) => format!(
+                "{}\n\n--- Retrieved Context ---\n{}\n--- End Context ---\n\n\
+                 Use the retrieved context above to inform your answer when relevant.",
+                DECISION_SYSTEM, ctx
+            ),
+            None => DECISION_SYSTEM.to_string(),
+        };
+
         let last_user = history
             .iter()
             .rfind(|m| m.role == "user")
@@ -116,7 +170,7 @@ impl<'a> Agent<'a> {
         let decision_messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: DECISION_SYSTEM.to_string(),
+                content: system,
             },
             ChatMessage {
                 role: "system".to_string(),

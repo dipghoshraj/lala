@@ -14,7 +14,7 @@ use commands::CommandResult;
 
 pub fn run(api_url: &str, smart_router: bool, store: RagStore) -> anyhow::Result<()> {
     let client = ApiClient::new(api_url);
-    let mut chat = Chat::new(&client, smart_router);
+    let mut chat = Chat::new(&client, smart_router, &store);
     let mut rl = DefaultEditor::new()?;
 
     print_banner(api_url, smart_router);

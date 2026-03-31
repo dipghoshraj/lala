@@ -1,5 +1,6 @@
 use crate::agent::model::{ApiClient, ChatMessage, RouteDecision};
 use crate::agent::planner::{Agent, needs_reasoning};
+use rag::RagStore;
 
 use super::display;
 
@@ -16,14 +17,14 @@ pub struct Chat<'a> {
 }
 
 impl<'a> Chat<'a> {
-    pub fn new(client: &'a ApiClient, smart_router: bool) -> Self {
+    pub fn new(client: &'a ApiClient, smart_router: bool, store: &'a RagStore) -> Self {
         let history = vec![ChatMessage {
             role: "system".to_string(),
             content: SYSTEM_PROMPT.to_string(),
         }];
 
         Self {
-            agent: Agent::new(client),
+            agent: Agent::new(client, store),
             smart_router,
             history,
         }
@@ -84,8 +85,29 @@ impl<'a> Chat<'a> {
     }
 
     fn run_reasoning(&mut self) {
+        // Retrieve context from RAG store.
+        let input = match self.history.iter().rfind(|m| m.role == "user") {
+            Some(m) => m.content.clone(),
+            None => {
+                display::error("No user message found.");
+                return;
+            }
+        };
+
+        let context = match display::with_spinner("retrieving", || {
+            self.agent.retrieve_context(&input)
+        }) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                display::warn(&format!("Retrieval error: {e} — proceeding without context."));
+                None
+            }
+        };
+
+        let ctx_ref = context.as_deref();
+
         let reasoning_result = display::with_spinner("reasoning", || {
-            self.agent.run_reasoning(&self.history)
+            self.agent.run_reasoning(&self.history, ctx_ref)
         });
 
         match reasoning_result {
@@ -102,7 +124,7 @@ impl<'a> Chat<'a> {
                 );
 
                 let decision_result = display::with_spinner("deciding", || {
-                    self.agent.run_decision(&self.history, &analysis)
+                    self.agent.run_decision(&self.history, &analysis, ctx_ref)
                 });
 
                 match decision_result {
