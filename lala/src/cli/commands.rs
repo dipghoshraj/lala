@@ -21,7 +21,7 @@ pub fn dispatch(input: &str, store: &RagStore) -> CommandResult {
             CommandResult::Handled
         }
         "/ingest" => {
-            ingest::ingest_all(store);
+            ingest::ingest_all(store, args);
             CommandResult::Handled
         }
         "/ingest-file" => {
@@ -69,7 +69,7 @@ fn print_help() {
     );
     println!("{}{}{}", display::DIM, sep, display::RESET);
     println!(
-        "  {}/ingest{}            Batch-ingest all files in ./ingest/",
+        "  {}/ingest [dir]{}      Batch-ingest files (recursive); defaults to ./ingest/",
         display::BOLD_GREEN,
         display::RESET,
     );

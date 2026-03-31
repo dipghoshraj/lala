@@ -26,22 +26,30 @@ fn scan_ingest_dir(dir: &str) -> anyhow::Result<Vec<String>> {
     }
 
     let mut files = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        if ft.is_file() {
-            if let Some(p) = entry.path().to_str() {
-                files.push(p.to_string());
-            }
-        }
-    }
+    collect_files(path, &mut files)?;
     files.sort();
     Ok(files)
 }
 
-/// `/ingest` — batch-ingest all files in the ingest directory.
-pub fn ingest_all(store: &RagStore) {
-    let dir = ingest_dir();
+/// Recursively collect all files under `dir`.
+fn collect_files(dir: &Path, out: &mut Vec<String>) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            collect_files(&entry.path(), out)?;
+        } else if ft.is_file() {
+            if let Some(p) = entry.path().to_str() {
+                out.push(p.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `/ingest [path]` — batch-ingest all files in the given directory (or the default ingest directory).
+pub fn ingest_all(store: &RagStore, args: &str) {
+    let dir = if args.is_empty() { ingest_dir() } else { args.to_string() };
 
     let files = match scan_ingest_dir(&dir) {
         Ok(f) => f,
