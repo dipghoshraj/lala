@@ -100,27 +100,22 @@ impl<'a> Agent<'a> {
     }
 
     /// Retrieve relevant chunks from the RAG store for the given query.
-    /// Returns `Some(context_string)` if chunks were found, `None` otherwise.
-    pub fn retrieve_context(&self, query: &str) -> anyhow::Result<Option<String>> {
+    /// Returns the matched chunks, or an empty vec if nothing matched.
+    pub fn retrieve_context(&self, query: &str) -> anyhow::Result<Vec<rag::Chunk>> {
         // Strip characters that are special in FTS5 query syntax.
         let sanitized: String = query
             .chars()
             .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
             .collect();
-        let sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
-        if sanitized.is_empty() {
-            return Ok(None);
+        // Join terms with OR so FTS5 matches any word (not all).
+        // This gives much better recall for conversational queries like
+        // "explain me about Lala front end" → "explain OR me OR about OR Lala OR front OR end".
+        let terms: Vec<&str> = sanitized.split_whitespace().collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
         }
-        let chunks = self.store.retrieve(&sanitized, 5)?;
-        if chunks.is_empty() {
-            return Ok(None);
-        }
-        let context = chunks
-            .iter()
-            .map(|c| c.chunk_text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n---\n");
-        Ok(Some(context))
+        let fts_query = terms.join(" OR ");
+        self.store.retrieve(&fts_query, 5)
     }
 
     /// Step 1 — send the full history to the reasoning model.

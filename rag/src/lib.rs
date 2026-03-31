@@ -14,6 +14,10 @@ pub struct Chunk {
     pub chunk_text: String,
     /// BM25 rank from SQLite — negative float, more negative = better match.
     pub score: f64,
+    /// Title of the parent document.
+    pub title: String,
+    /// Source path of the parent document.
+    pub source: String,
 }
 
 /// SQLite FTS5-backed document store for keyword (BM25) retrieval.
@@ -93,9 +97,11 @@ impl RagStore {
     /// BM25 full-text search — return top `k` chunks ordered by relevance.
     pub fn retrieve(&self, query: &str, k: usize) -> Result<Vec<Chunk>> {
         let mut stmt = self.conn.prepare(
-            "SELECT chunk_id, document_id, chunk_index, chunk_text, bm25(chunks_fts) AS score
-             FROM   chunks_fts
-             WHERE  chunk_text MATCH ?1
+            "SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                    bm25(chunks_fts) AS score, d.title, d.source
+             FROM   chunks_fts c
+             JOIN   documents d ON d.id = c.document_id
+             WHERE  c.chunk_text MATCH ?1
              ORDER  BY bm25(chunks_fts)
              LIMIT  ?2",
         )?;
@@ -107,6 +113,8 @@ impl RagStore {
                 chunk_index: row.get::<_, i64>(2)? as usize,
                 chunk_text: row.get(3)?,
                 score: row.get(4)?,
+                title: row.get(5)?,
+                source: row.get(6)?,
             })
         })?;
 

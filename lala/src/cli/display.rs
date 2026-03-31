@@ -87,3 +87,44 @@ pub fn progress(current: usize, total: usize, label: &str) {
         DIM, current, total, RESET, label
     );
 }
+
+/// Print the retrieved RAG sources with file, chunk index, score, and preview.
+pub fn print_sources(chunks: &[rag::Chunk]) {
+    use std::collections::BTreeSet;
+
+    println!();
+    let sep = "─".repeat(SECTION_WIDTH);
+    println!(
+        "{}▷ Sources{}",
+        BOLD_GREEN, RESET
+    );
+    println!("{}{}{}", BOLD_GREEN, sep, RESET);
+
+    // Deduplicate source files for the summary line.
+    let files: BTreeSet<&str> = chunks.iter().map(|c| c.source.as_str()).collect();
+    println!(
+        "  {}Files:{} {}",
+        BOLD, RESET,
+        files.into_iter().collect::<Vec<_>>().join(", ")
+    );
+    println!();
+
+    for (i, c) in chunks.iter().enumerate() {
+        let preview: String = c.chunk_text.chars().take(120).collect();
+        println!(
+            "  {}[{}]{} {}{}{} chunk #{} score: {}{:.4}{}",
+            BOLD, i + 1, RESET,
+            CYAN, c.title, RESET,
+            c.chunk_index,
+            DIM, c.score, RESET,
+        );
+        println!(
+            "      {}{}…{}",
+            DIM, preview, RESET,
+        );
+        println!();
+    }
+
+    println!("{}{}{}", BOLD_GREEN, sep, RESET);
+    println!();
+}

@@ -94,17 +94,34 @@ impl<'a> Chat<'a> {
             }
         };
 
-        let context = match display::with_spinner("retrieving", || {
+        let chunks = match display::with_spinner("retrieving", || {
             self.agent.retrieve_context(&input)
         }) {
-            Ok(ctx) => ctx,
+            Ok(c) => c,
             Err(e) => {
                 display::warn(&format!("Retrieval error: {e} — proceeding without context."));
-                None
+                Vec::new()
             }
         };
 
-        let ctx_ref = context.as_deref();
+        // Display retrieved sources if any were found.
+        if !chunks.is_empty() {
+            display::print_sources(&chunks);
+        }
+
+        // Build context string for LLM injection.
+        let context_str = if chunks.is_empty() {
+            None
+        } else {
+            Some(
+                chunks
+                    .iter()
+                    .map(|c| c.chunk_text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n---\n"),
+            )
+        };
+        let ctx_ref = context_str.as_deref();
 
         let reasoning_result = display::with_spinner("reasoning", || {
             self.agent.run_reasoning(&self.history, ctx_ref)
