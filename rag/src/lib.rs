@@ -116,6 +116,24 @@ impl RagStore {
         }
         Ok(results)
     }
+
+    /// Count of documents in the store.
+    pub fn document_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
+    /// Count of chunks in the store.
+    pub fn chunk_count(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks_fts",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
 }
 
 /// Simple ISO-8601 timestamp without pulling in chrono.
