@@ -1,6 +1,8 @@
 mod agent;
 mod cli;
 
+use rag::RagStore;
+
 fn main() -> anyhow::Result<()> {
     // API URL from CLI arg, then env var, then default.
     let api_url = std::env::args()
@@ -14,5 +16,9 @@ fn main() -> anyhow::Result<()> {
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
 
-    cli::run(&api_url, smart_router)
+    // DB path from env var, then default.
+    let db_path = std::env::var("LALA_DB_PATH").unwrap_or_else(|_| "./lala.db".to_string());
+    let store = RagStore::open(&db_path)?;
+
+    cli::run(&api_url, smart_router, store)
 }

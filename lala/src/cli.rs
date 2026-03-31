@@ -9,6 +9,7 @@ use rustyline::error::ReadlineError;
 
 use crate::agent::model::{ApiClient, ChatMessage, RouteDecision};
 use crate::agent::planner::{Agent, needs_reasoning};
+use rag::RagStore;
 
 // Braille spinner — visible in any modern terminal (Windows Terminal, VS Code, etc.)
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -73,7 +74,7 @@ fn print_section(header: &str, header_color: &str, text_color: &str, content: &s
     println!();
 }
 
-pub fn run(api_url: &str, smart_router: bool) -> anyhow::Result<()> {
+pub fn run(api_url: &str, smart_router: bool, store: RagStore) -> anyhow::Result<()> {
     let client = ApiClient::new(api_url);
     let agent = Agent::new(&client);
     let mut rl = DefaultEditor::new()?;
@@ -88,7 +89,7 @@ pub fn run(api_url: &str, smart_router: bool) -> anyhow::Result<()> {
     if smart_router {
         println!("Router: LLM classifier (LALA_SMART_ROUTER=1)");
     }
-    println!("Commands: /clear  reset conversation | /exit  quit\n");
+    println!("Commands: /clear  reset conversation | /ingest-file <path> | /search <query> | /exit  quit\n");
 
     loop {
         let line = match rl.readline(">> ") {
@@ -108,6 +109,57 @@ pub fn run(api_url: &str, smart_router: bool) -> anyhow::Result<()> {
             "/clear" => {
                 history.truncate(1); // keep system prompt
                 println!("Conversation cleared.\n");
+                continue;
+            }
+            s if s.starts_with("/ingest-file") => {
+                let path = s.strip_prefix("/ingest-file").unwrap().trim();
+                if path.is_empty() {
+                    println!("Usage: /ingest-file <path>\n");
+                    continue;
+                }
+                match std::fs::read_to_string(path) {
+                    Err(_) => println!("Error: file not found: {path}\n"),
+                    Ok(content) if content.is_empty() => {
+                        println!("Warning: file is empty, nothing to ingest\n");
+                    }
+                    Ok(content) => {
+                        let title = std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.to_string());
+                        match store.store(&title, path, &content) {
+                            Ok(count) => println!("Ingested {path} → {count} chunks\n"),
+                            Err(e) => println!("{e}\n"),
+                        }
+                    }
+                }
+                continue;
+            }
+            s if s.starts_with("/search") => {
+                let query = s.strip_prefix("/search").unwrap().trim();
+                if query.is_empty() {
+                    println!("Usage: /search <query>\n");
+                    continue;
+                }
+                match store.retrieve(query, 5) {
+                    Ok(chunks) if chunks.is_empty() => {
+                        println!("No results found for: {query}\n");
+                    }
+                    Ok(chunks) => {
+                        for (i, c) in chunks.iter().enumerate() {
+                            let preview: String =
+                                c.chunk_text.chars().take(100).collect();
+                            println!(
+                                "  [{}] score: {:.4}  chunk #{}\n      {}…\n",
+                                i + 1,
+                                c.score,
+                                c.chunk_index,
+                                preview
+                            );
+                        }
+                    }
+                    Err(e) => println!("Search error: {e}\n"),
+                }
                 continue;
             }
             _ => {}
