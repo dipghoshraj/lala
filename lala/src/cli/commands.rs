@@ -157,8 +157,20 @@ fn search(store: &RagStore, query: &str) {
 // ── /status ───────────────────────────────────────────────────────────────────
 
 fn print_status(store: &RagStore) {
-    let docs = store.document_count().unwrap_or(0);
-    let chunks = store.chunk_count().unwrap_or(0);
+    let docs = match store.document_count() {
+        Ok(count) => count.to_string(),
+        Err(e) => {
+            display::error(&format!("Failed to read document count: {e}"));
+            "N/A".to_string()
+        }
+    };
+    let chunks = match store.chunk_count() {
+        Ok(count) => count.to_string(),
+        Err(e) => {
+            display::error(&format!("Failed to read chunk count: {e}"));
+            "N/A".to_string()
+        }
+    };
     let ingest_dir = std::env::var("LALA_INGEST_DIR").unwrap_or_else(|_| "./ingest".to_string());
 
     println!();
