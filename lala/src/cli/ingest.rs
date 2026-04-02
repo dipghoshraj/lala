@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use crate::agent::memory::LlmMemoryExtractor;
 use crate::agent::model::ApiClient;
 use rag::RagStore;
 
@@ -166,9 +165,7 @@ fn ingest_single_file(store: &RagStore, client: &ApiClient, path: &str) -> Inges
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string());
 
-    let extractor = LlmMemoryExtractor::new(client);
-
-    match store.ingest(&title, path, &content, Some(&extractor)) {
+    match store.ingest(&title, path, &content) {
         Ok(count) => IngestResult::Ok(count),
         Err(e) => {
             let msg = e.to_string();

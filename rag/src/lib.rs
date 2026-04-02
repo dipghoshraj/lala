@@ -6,14 +6,6 @@ use anyhow::{Result, bail};
 use rusqlite::Connection;
 use uuid::Uuid;
 
-/// Trait for LLM-based memory extraction.
-/// Implementations extract FACTS, CAPABILITIES, CONSTRAINTS from text via LLM.
-pub trait MemoryExtractor {
-    /// Extract structured memory from chunk text.
-    /// Returns (facts, capabilities, constraints) as semicolon-delimited strings.
-    fn extract_memory(&self, chunk_text: &str) -> Result<(String, String, String)>;
-}
-
 /// A retrieved chunk with its BM25 relevance score.
 pub struct Chunk {
     pub id: String,
@@ -42,6 +34,13 @@ pub struct MemoryBlock {
 }
 
 /// SQLite FTS5-backed document store for keyword (BM25) retrieval.
+/// Trait for LLM-based memory extraction (unused in standard ingestion path).
+///
+/// Kept for compatibility, but CLI ingestion no longer invokes it.
+pub trait MemoryExtractor {
+    fn extract_memory(&self, chunk_text: &str) -> Result<(String, String, String)>;
+}
+
 pub struct RagStore {
     conn: Connection,
 }
@@ -143,19 +142,11 @@ impl RagStore {
         Ok(chunks.len())
     }
 
-    /// Ingest a document and optionally run memory extraction from an LLM extractor.
+    /// Ingest a document and store chunks with raw text in memory fields.
     ///
-    /// This keeps CLI ingestion as a thin interface and moves chunk creation,
-    /// document persist, and memory block saving into the Rag layer.
-    pub fn ingest(&self, title: &str, source: &str, text: &str, extractor: Option<&dyn MemoryExtractor>) -> Result<usize> {
-        let count = self.store(title, source, text)?;
-
-        if let Some(extractor) = extractor {
-            // best effort; do not fail ingestion if extraction has an issue
-            let _ = self.extract_memory_from_source(source, extractor);
-        }
-
-        Ok(count)
+    /// No LLM memory extraction is invoked; all data stays as text chunks.
+    pub fn ingest(&self, title: &str, source: &str, text: &str) -> Result<usize> {
+        self.store(title, source, text)
     }
 
     /// BM25 full-text search — return top `k` chunks ordered by relevance.
@@ -323,40 +314,6 @@ impl RagStore {
         Ok(())
     }
 
-    /// Extract memory blocks for a source document using an LLM extractor.
-    /// Filters prose content, calls LLM for each chunk, and updates memory blocks in database.
-    pub fn extract_memory_from_source(
-        &self,
-        source_path: &str,
-        extractor: &dyn MemoryExtractor,
-    ) -> Result<(usize, usize)> {
-        // Retrieve memory blocks for this source
-        let blocks = self.memory_blocks_for_source(source_path)?;
-
-        let mut prose_count = 0;
-        let mut filtered_count = 0;
-
-        for block in blocks {
-            // Pre-filter: only process prose content
-            if !is_prose_content(&block.chunk_text) {
-                filtered_count += 1;
-                continue;
-            }
-            prose_count += 1;
-
-            // Call LLM to extract structured memory
-            match extractor.extract_memory(&block.chunk_text) {
-                Ok((facts, capabilities, constraints)) => {
-                    let _ = self.update_memory_block(&block.id, &facts, &capabilities, &constraints);
-                }
-                Err(_e) => {
-                    // Silently skip extraction errors
-                }
-            }
-        }
-
-        Ok((prose_count, filtered_count))
-    }
 }
 
 /// Detect if text is prose (descriptive, explanatory) vs code or structured data.
