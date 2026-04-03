@@ -7,18 +7,24 @@
 
 ## Overview
 
-`lala` is the front-end of the system. It owns the user experience: readline input, multi-turn conversation history, a spinner animation during inference, folder-based document ingestion, BM25 search over ingested content, and clean error recovery. It has no direct knowledge of the model — all LLM communication goes through HTTP to the LLML server.
+`lala` is the front-end of the system. It owns the user experience: readline input, multi-turn conversation history, a spinner animation during inference, folder-based document ingestion, RSS news ingestion, BM25 keyword search, structured memory block search, and clean error recovery. It has no direct knowledge of the model — all LLM communication goes through HTTP to the LLML server.
+
+RAG context is automatically retrieved on **every** query (both direct and reasoning paths) and injected into the model prompt as retrieved context, up to a 800-token budget.
 
 ```
 User (terminal)
       │
-  rustyline REPL  →  command dispatch (/ingest, /search, /status, /help, ...)
+  rustyline REPL  →  command dispatch (/ingest, /ingest-news, /search, /memory-search, ...)
       │                         │
-      │                    rag::RagStore  ──►  SQLite FTS5 (lala.db)
+      │                    rag::RagStore  ──►  SQLite FTS5 + memory_blocks (lala.db)
       │
   conversation history (in-memory)
       │
-  POST /v1/chat/completions  ──►  LLML API server
+  agent pipeline:
+    ├── retrieve_context(query)        → top-5 BM25 chunks
+    ├── retrieve_memory_context(query) → top-5 structured memory blocks
+    ├── inject context into system prompt (token budget: 800)
+    └── POST /v1/chat/completions  ──►  LLML API server
       │
   spinner thread  (while waiting)
       │
@@ -33,14 +39,15 @@ User (terminal)
 lala/src/
   main.rs              # Entry point — resolves API URL, DB path, SMART_ROUTER; inits RagStore
   cli/
-    mod.rs             # REPL loop, welcome banner, chat routing
-    commands.rs        # Command dispatch (/help, /status, /search, /ingest, /clear, /exit)
-    ingest.rs          # Batch + single-file ingestion with progress output
-    display.rs         # Spinner, ANSI colours, print_section(), info/success/warn/error helpers
+    mod.rs             # REPL loop, animated banner, command/chat dispatch
+    chat.rs            # Chat struct — history, classify→route, retrieve_context→inject, spinner
+    commands.rs        # Command dispatch (/help, /status, /search, /memory-search, /ingest, /ingest-news, /clear, /exit)
+    ingest.rs          # Batch + single-file + RSS news ingestion with progress output
+    display.rs         # Spinner, ANSI colours, print_section(), print_sources(), info/success/warn/error helpers
   agent/
     mod.rs
     model.rs           # ApiClient — HTTP wrapper (chat, reason, decide, classify); RouteDecision enum
-    planner.rs         # Agent — classify_query(), run_direct(), run_reasoning(), run_decision()
+    planner.rs         # Agent — classify_query(), run_direct(), run_reasoning(), run_decision(), retrieve_context(), retrieve_memory_context()
 ```
 
 ---
@@ -79,6 +86,7 @@ URL resolution priority: **CLI argument → `LLML_API_URL` env var → `http://l
 | `LALA_SMART_ROUTER` | unset | Set to `1` to enable LLM-based query classification |
 | `LALA_DB_PATH` | `./lala.db` | SQLite database file path for RAG storage |
 | `LALA_INGEST_DIR` | `./ingest` | Directory scanned by `/ingest` for batch ingestion |
+| `LALA_QDRANT_URL` | _(planned)_ | Qdrant endpoint URL — Phase 1 vector search migration |
 
 ---
 
@@ -86,10 +94,12 @@ URL resolution priority: **CLI argument → `LLML_API_URL` env var → `http://l
 
 | Input | Action |
 |-------|--------|
-| Any text | Send as a user message to the LLM |
+| Any text | Send as a user message to the LLM (RAG context auto-injected) |
 | `/ingest` | Batch-ingest all files in `./ingest/` (or `LALA_INGEST_DIR`) |
 | `/ingest-file <path>` | Ingest a single file by explicit path |
+| `/ingest-news <rss_url>` | Fetch an RSS feed and ingest all articles |
 | `/search <query>` | BM25 full-text search over ingested documents (top 5 results) |
+| `/memory-search <query>` | BM25 search over structured memory blocks (facts / capabilities / constraints) |
 | `/status` | Show document count, chunk count, ingest directory |
 | `/help` | Show available commands |
 | `/clear` | Reset conversation history (keeps system prompt) |
@@ -100,7 +110,7 @@ Arrow-key history navigation (up/down) is provided by `rustyline`.
 
 ### Ingestion
 
-Place files in the `./ingest/` directory and run `/ingest` to batch-process all of them. Each file is read, chunked into 512-character overlapping windows (64-char overlap), and stored in SQLite FTS5. Duplicate files (same source path) are skipped. Progress and a summary are displayed:
+Place files in the `./ingest/` directory and run `/ingest` to batch-process all of them. Each file is read, chunked into 512-character overlapping windows (64-char overlap), and stored in SQLite FTS5 alongside auto-extracted memory blocks. Duplicate files (same source path) are skipped. Progress and a summary are displayed:
 
 ```
 >> /ingest
@@ -118,6 +128,20 @@ Place files in the `./ingest/` directory and run `/ingest` to batch-process all 
 
 For one-off files outside the ingest directory, use `/ingest-file <path>`.
 
+**RSS News Ingestion**
+
+Fetch an RSS feed and automatically ingest all linked articles:
+
+```
+>> /ingest-news https://feeds.bbci.co.uk/news/rss.xml
+  ℹ Ingesting news from: https://feeds.bbci.co.uk/news/rss.xml
+  ────────────────────────────────────────────────────────────
+  Ingested: 14  Skipped: 3  Failed: 1
+  ────────────────────────────────────────────────────────────
+```
+
+Articles are fetched with a 1-second polite delay between requests. A CORS-proxy fallback is tried automatically on HTTP 403 responses. Each article is chunked and deduplicated by URL (source field).
+
 ### Search
 
 ```
@@ -129,6 +153,20 @@ For one-off files outside the ingest directory, use `/ingest-file <path>`.
 ```
 
 Returns top 5 chunks ranked by BM25 relevance. More negative score = better match.
+
+### Memory Search
+
+Search across structured memory blocks extracted from ingested documents:
+
+```
+>> /memory-search system constraints
+  [1] chunk #3  source: ./ingest/architecture.md
+    FACTS: The system processes queries through a layered pipeline…
+    CAPABILITIES: Supports multi-turn conversation with RAG context injection…
+    CONSTRAINTS: Retrieval is limited to 800 tokens per query…
+```
+
+Memory blocks store the same text as chunks (Phase 0 placeholder). In Phase 1, these fields will be populated by LLM-based extraction, exposing structured `facts`, `capabilities`, and `constraints` per chunk.
 
 ---
 
@@ -204,6 +242,29 @@ Returned by `ApiClient::classify()` and by `Agent::classify_query()`. Defaults t
 
 ---
 
+## RAG Context Injection — `cli/chat.rs`
+
+Every query (both direct and reasoning paths) automatically retrieves context from the RAG store before calling the model:
+
+```
+input query
+    │
+    ▼
+ retrieve_context(query)         → top-5 BM25 chunks   (800-token budget)
+ retrieve_memory_context(query)  → top-5 memory blocks (fits within same budget)
+    │
+    ▼
+ inject into system prompt as "--- Retrieved Context ---" block
+    │  (context is omitted if store is empty or no results)
+    ▼
+ display print_sources() / memory blocks to terminal
+    │
+    ▼
+ pass context_str to run_direct() / run_reasoning() / run_decision()
+```
+
+The token budget (`CONTEXT_TOKEN_BUDGET = 800`) is enforced by `limit_chunks_by_tokens()` and `limit_memory_by_tokens()` in `planner.rs` so the combined context never overflows the model's context window.
+
 ## Query Router — `agent/planner.rs`
 
 Every user turn goes through a routing decision before inference:
@@ -217,13 +278,15 @@ input query
     ├── LALA_SMART_ROUTER=1  →  POST /v1/classify  → RouteDecision
     └── heuristic (default)  →  needs_reasoning(input) → RouteDecision
     │
-    ├── Direct     →  run_direct(history)             → decision model only
-    └── Reasoning  →  run_reasoning(history)          → reasoning model
-                        run_decision(history, analysis) → decision model
+    ├── Direct     →  run_direct(history, context)             → decision model only
+    └── Reasoning  →  run_reasoning(history, context)          → reasoning model
+                        run_decision(history, analysis, context) → decision model
 ```
 
 - `needs_reasoning()` — local keyword + word-count heuristic; used as fallback when server is unreachable or smart router is off.
 - `classify_query()` — calls `client.classify()`, falls back to `needs_reasoning()` on any `Err`.
+- `retrieve_context()` — sanitises query, calls `store.retrieve()`, returns `Vec<Chunk>`.
+- `retrieve_memory_context()` — same flow via `store.retrieve_memory_blocks()`.
 - Reasoning output is displayed to the user under a `▷ Reasoning` section (yellow ANSI).
 
 ---
@@ -250,7 +313,7 @@ This can be edited in `cli/mod.rs` under `const SYSTEM_PROMPT`.
 | `rustyline` | Readline-style input with history and arrow-key navigation |
 | `serde` / `serde_json` | HTTP request/response serialization |
 | `anyhow`    | Error propagation |
-| `rag` (path dep) | Standalone RAG crate — SQLite FTS5 store, retrieve, document/chunk counts |
+| `rag` (path dep) | Standalone RAG crate — SQLite FTS5 keyword store, BM25 retrieve, memory blocks, RSS news ingestion |
 
 ---
 
@@ -267,4 +330,18 @@ This can be edited in `cli/mod.rs` under `const SYSTEM_PROMPT`.
 └─────────────┘                                   └──────────────────┘
 ```
 
-See [LLML-py.md](LLML-py.md) for the server-side documentation.
+See [LLML.md](LLML.md) for the server-side documentation.
+
+---
+
+## Planned: Qdrant Vector Search (Phase 1)
+
+The `rag` crate currently uses SQLite FTS5 for keyword (BM25) retrieval. Phase 1 will migrate the RAG backend to **Qdrant** for dense vector similarity search. The `RagStore` public API (`store()`, `retrieve()`, `retrieve_memory_blocks()`) will remain unchanged; only the backend implementation inside the `rag` crate changes.
+
+Required additions (Phase 1):
+- `POST /v1/embed` endpoint in LLML to generate chunk/query embeddings
+- `LALA_QDRANT_URL` env var for the Qdrant gRPC/HTTP endpoint
+- Embedding model entry in `ai-config.yaml` (e.g. `bge-small-en-v1.5`)
+- `qdrant-client` dependency in `rag/Cargo.toml` replacing `rusqlite`
+
+See [doc/planning/phase0-rag.md](planning/phase0-rag.md) for the full migration plan.

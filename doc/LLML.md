@@ -112,6 +112,7 @@ Simple dict-based registry mapping role strings to `ModelRunner` instances:
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat inference (non-streaming + SSE streaming) |
 | `POST` | `/v1/classify` | Query routing — classifies as `"direct"` or `"reasoning"` |
 | `GET`  | `/v1/models` | Lists all registered role names |
+| `POST` | `/v1/embed` | _(planned — Phase 1)_ Generate embeddings for Qdrant vector search |
 
 ### POST `/v1/chat/completions`
 
@@ -284,6 +285,47 @@ Standard Python logging, `INFO` level by default:
 ```sh
 # Streaming logs to stdout
 PYTHONUNBUFFERED=1 python main.py
+```
+
+---
+
+## Planned: Embedding Endpoint (Phase 1)
+
+Phase 1 will add a `POST /v1/embed` endpoint to support Qdrant vector search. LLML will load a dedicated embedding model (e.g. `bge-small-en-v1.5`) registered under the role `"embedding"` in `ai-config.yaml`.
+
+**Request:**
+```json
+{
+  "input": ["chunk text 1", "chunk text 2"],
+  "model": "embedding"
+}
+```
+
+**Response:**
+```json
+{
+  "object": "list",
+  "data": [
+    { "index": 0, "embedding": [0.021, -0.043, ...], "object": "embedding" },
+    { "index": 1, "embedding": [0.007, 0.112, ...],  "object": "embedding" }
+  ],
+  "model": "embedding"
+}
+```
+
+The `rag` crate (Rust) will call this endpoint during `store()` to embed each chunk and during `retrieve()` to embed the query before the Qdrant vector search. LLML remains stateless — no Qdrant client in LLML; Qdrant interaction stays in the `rag` crate.
+
+Required `ai-config.yaml` addition:
+```yaml
+- name: "bge-small-embedding"
+  description: "Sentence embedding model for semantic search"
+  role: "embedding"
+  parameters:
+    - name: "n_ctx"
+      default: 512
+    - name: "n_batch"
+      default: 512
+  modelPath: "/models/bge-small-en-v1.5-q4_k_m.gguf"
 ```
 
 ---

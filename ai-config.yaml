@@ -71,7 +71,7 @@ Models:
       - name: "n_ctx"
         description: "Context window size in tokens. Kept smaller for faster KV cache allocation."
         type: "integer"
-        default: 1024
+        default: 8000
       - name: "n_batch"
         description: "Batch size for prompt evaluation."
         type: "integer"
