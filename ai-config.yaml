@@ -41,6 +41,10 @@ Models:
         description: "Pin model weights in RAM (prevents OS from swapping them out during inference). 1 = enabled."
         type: "integer"
         default: 1
+      - name: "embedding"
+        description: "Whether to generate embeddings instead of text. 1 = enabled."
+        type: "integer"
+        default: 0
     modelPath: "D:\\models\\deepseek-coder-1.3b-instruct.Q4_K_M.gguf"
 
   - name: "mistral-decision"
@@ -80,6 +84,10 @@ Models:
         description: "Pin model weights in RAM. 1 = enabled."
         type: "integer"
         default: 1
+      - name: "embedding"
+        description: "Whether to generate embeddings instead of text. 1 = enabled."
+        type: "integer"
+        default: 0
     modelPath: "D:\\models\\qwen2.5-3b-instruct-q4_k_m.gguf"
 
   - name: "embedding"
@@ -119,4 +127,8 @@ Models:
         description: "Pin model weights in RAM. 1 = enabled."
         type: "integer"
         default: 1
-    modelPath: "D:\\models\\all-MiniLM-L6-v2-Q4_K_M.gguf"
+      - name: "embedding"
+        description: "Whether to generate embeddings instead of text. 1 = enabled."
+        type: "integer"
+        default: 1
+    modelPath: "D:\\models\\bge-small-en-v1.5-q4_k_m.gguf"
